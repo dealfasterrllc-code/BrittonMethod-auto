@@ -1,5 +1,5 @@
 import os
-
+aaa
 structure = {
     "README.md": "# BrittonMethod‑auto\nAutomation system for real estate wholesaling (world‑class edition)",
     ".gitignore": "logs/\nconfig/secrets.env\n__pycache__/\n*.pyc\n*.sqlite3\n",
