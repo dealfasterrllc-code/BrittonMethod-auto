@@ -1,49 +1,128 @@
 import os
-aaa
+
+# 🚀 World-Class BrittonMethod-auto Project Structure
 structure = {
-    "README.md": "# BrittonMethod‑auto\nAutomation system for real estate wholesaling (world‑class edition)",
-    ".gitignore": "logs/\nconfig/secrets.env\n__pycache__/\n*.pyc\n*.sqlite3\n",
-    "LICENSE": "MIT License",
-    "Main.py": "from core.scheduler import run_all_tasks\n\nif __name__ == \"__main__\":\n    print(\"Starting BrittonMethod‑auto system…\")\n    run_all_tasks()",
-    "requirements.txt": "requests\nbeautifulsoup4\npandas\nnumpy\nsqlalchemy\nstreamlit\nflask\ntwilio\nopenai\npytest\nschedule\n",
-    "config/config_example.py": "CREXI_API_KEY = \"\"\nLOOPNET_API_KEY = \"\"\nZILLOW_API_KEY = \"\"\nPROPWIRE_API_KEY = \"\"\nTWILIO_SID = \"\"\nTWILIO_AUTH = \"\"\nOPENAI_KEY = \"\"\n",
-    "config/secrets.env": "",
-    "core/scheduler.py": "def run_all_tasks():\n    print('Running all tasks…')\n",
-    "core/controller.py": "def control_execution():\n    print('Controlling workflow execution…')\n",
-    "core/logger.py": "import logging\nlogging.basicConfig(filename='logs/system.log', level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')\ndef log(msg):\n    logging.info(msg)\n    print(f\"[LOG] {msg}\")\n",
-    "core/monitor.py": "def health_check():\n    print('System health OK')\n",
-    "modules/ingestion.py": "def pull_deals():\n    print('Pulling listings and new leads…')\n",
-    "modules/enrichment.py": "def enrich_data():\n    print('Enriching with public records, comps…')\n",
-    "modules/scoring.py": "def score_deal():\n    print('Scoring deal…')\n",
-    "modules/offer.py": "def create_loi():\n    print('Generating LOI/PDF…')\n",
-    "modules/investor.py": "def send_packages():\n    print('Sending investor packages…')\n",
-    "modules/notifications.py": "def notify_channels():\n    print('Sending notifications (email/SMS/WhatsApp)…')\n",
-    "modules/utils.py": "def format_currency(val):\n    return f\"${val:,.2f}\"\n",
-    "modules/ai/deal_prioritizer.py": "def rank_deals():\n    print('Ranking deals using AI…')\n",
-    "modules/ai/email_writer.py": "def draft_email():\n    print('Drafting email via AI…')\n",
-    "modules/ai/chat_agent.py": "def chat_assistant():\n    print('AI assistant ready for Q&A…')\n",
-    "modules/api_wrappers/crexi_api.py": "def test_crexi():\n    print('Testing Crexi API…')\n",
-    "modules/api_wrappers/loopnet_api.py": "def test_loopnet():\n    print('Testing LoopNet API…')\n",
-    "modules/api_wrappers/propwire_api.py": "def test_propwire():\n    print('Testing PropWire API…')\n",
-    "modules/api_wrappers/zillow_api.py": "def test_zillow():\n    print('Testing Zillow API…')\n",
-    "modules/api_wrappers/realtor_api.py": "def test_realtor():\n    print('Testing Realtor API…')\n",
-    "analytics/roi_analysis.py": "def analyse_roi():\n    print('Calculating ROI…')\n",
-    "analytics/market_trends.py": "def analyse_trends():\n    print('Analyzing market trends…')\n",
-    "analytics/predictive.py": "def predictive_model():\n    print('Running predictive model…')\n",
-    "workflows/sample_workflow.json": "{\n  \"workflow\": \"sample\" \n}\n",
+    # Root files
+    "README.md": "# BrittonMethod-auto\nAutomation system for real estate wholesaling\n\nWorld-class modular architecture for scraping, analyzing, scoring, and distributing deals.",
+    "Main.py": (
+        "from core.scheduler import run_all_tasks\n\n"
+        "if __name__ == '__main__':\n"
+        "    print('Starting BrittonMethod automation...')\n"
+        "    run_all_tasks()"
+    ),
+    "requirements.txt": "\n".join([
+        "requests",
+        "beautifulsoup4",
+        "pandas",
+        "numpy",
+        "sqlalchemy",
+        "streamlit",
+        "flask",
+        "twilio",
+        "openai",
+        "python-dotenv",
+        "matplotlib",
+        "seaborn",
+        "scikit-learn"
+    ]),
+    ".env_example": "\n".join([
+        "CREXI_API_KEY=",
+        "LOOPNET_API_KEY=",
+        "ZILLOW_API_KEY=",
+        "PROPWIRE_API_KEY=",
+        "TWILIO_SID=",
+        "TWILIO_AUTH=",
+        "OPENAI_KEY=",
+        "EMAIL_SENDER=",
+        "EMAIL_PASSWORD="
+    ]),
+
+    # Config
+    "config/config_example.py": (
+        'from dotenv import load_dotenv\n'
+        'load_dotenv()\n\n'
+        'CREXI_API_KEY = os.getenv("CREXI_API_KEY")\n'
+        'LOOPNET_API_KEY = os.getenv("LOOPNET_API_KEY")\n'
+        'ZILLOW_API_KEY = os.getenv("ZILLOW_API_KEY")\n'
+        'PROPWIRE_API_KEY = os.getenv("PROPWIRE_API_KEY")\n'
+        'TWILIO_SID = os.getenv("TWILIO_SID")\n'
+        'TWILIO_AUTH = os.getenv("TWILIO_AUTH")\n'
+        'OPENAI_KEY = os.getenv("OPENAI_KEY")\n'
+        'EMAIL_SENDER = os.getenv("EMAIL_SENDER")\n'
+        'EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")'
+    ),
+
+    # Core orchestration
+    "core/scheduler.py": "def run_all_tasks():\n    print('Running all tasks...')",
+    "core/controller.py": "def control_execution():\n    print('Controlling workflow execution...')",
+    "core/logger.py": "def log(msg, level='INFO'):\n    print(f'[{level}] {msg}')",
+    "core/monitor.py": "def health_check():\n    print('System health OK')",
+
+    # Modules
+    "modules/ingestion.py": "def pull_deals():\n    print('Pulling deals from web/email/API...')",
+    "modules/enrichment.py": "def enrich():\n    print('Enriching property data with public records/comps...')",
+    "modules/scoring.py": "def score():\n    print('Scoring deals for ROI and risk...')",
+    "modules/offer.py": "def make_offer():\n    print('Creating LOI and sending to investors...')",
+    "modules/investor.py": "def send_packages():\n    print('Sending investor packages...')",
+    "modules/notifications.py": "def notify():\n    print('Sending notifications via email/SMS/WhatsApp...')",
+
+    # AI Modules
+    "modules/ai/deal_prioritizer.py": "def rank_deals():\n    print('Ranking deals using AI/ML...')",
+    "modules/ai/email_writer.py": "def draft_email():\n    print('Drafting emails/LOIs via AI...')",
+    "modules/ai/chat_agent.py": "def chat():\n    print('AI interactive assistant ready...')",
+
+    # API wrappers
+    "modules/api_wrappers/crexi_api.py": "def test():\n    print('Testing Crexi API...')",
+    "modules/api_wrappers/loopnet_api.py": "def test():\n    print('Testing LoopNet API...')",
+    "modules/api_wrappers/propwire_api.py": "def test():\n    print('Testing PropWire API...')",
+    "modules/api_wrappers/zillow_api.py": "def test():\n    print('Testing Zillow API...')",
+    "modules/api_wrappers/realtor_api.py": "def test():\n    print('Testing Realtor API...')",
+
+    # Analytics & ML
+    "analytics/roi_analysis.py": "def roi():\n    print('Calculating ROI...')",
+    "analytics/market_trends.py": "def trends():\n    print('Analyzing market trends...')",
+    "analytics/predictive.py": "def predict():\n    print('Predicting market changes using AI/ML...')",
+
+    # Workflows
+    "workflows/sample_workflow.json": "{}",
+    "workflows/n8n_example.json": '{"workflow": "example"}',
+
+    # Data
     "data/listings.db": "",
-    "data/investors.db": "",
+    "data/archive/.gitkeep": "",
+
+    # Logs
     "logs/system.log": "",
-    "dashboard/app.py": "import streamlit as st\nst.title(\"BrittonMethod Dashboard\")\nst.write(\"Monitor deals, pipeline, investor packages…\")\n",
+    "logs/errors.log": "",
+
+    # Dashboard
+    "dashboard/app.py": "print('Dashboard starting...')",
     "dashboard/reports/.gitkeep": "",
     "dashboard/charts/.gitkeep": "",
     "dashboard/alerts/.gitkeep": "",
-    "tests/unit/test_utils.py": "from modules.utils import format_currency\ndef test_format_currency():\n    assert format_currency(1234.5) == \"$1,234.50\"\n",
+
+    # Tests
+    "tests/unit/.gitkeep": "",
     "tests/integration/.gitkeep": "",
     "tests/regression/.gitkeep": "",
-    ".github/workflows/deploy.yml": "name: Deploy to Render\non: [ push ]\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v2\n      - run: echo \"Deploying to Render.com...\"\n"
+
+    # Docs
+    "docs/README.md": "# Documentation\nGuides for modules, API integration, workflows, and deployment.",
+
+    # CI/CD
+    ".github/workflows/deploy.yml": (
+        "name: Deploy\n"
+        "on: [push]\n"
+        "jobs:\n"
+        "  deploy:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v2\n"
+        "      - run: echo 'Deploying to Render.com...'"
+    )
 }
 
+# Create all folders and files
 for path, content in structure.items():
     folder = os.path.dirname(path)
     if folder and not os.path.exists(folder):
@@ -51,4 +130,4 @@ for path, content in structure.items():
     with open(path, "w") as f:
         f.write(content)
 
-print("✅ Project structure created – world‑class edition!")
+print("✅ World-class BrittonMethod-auto project structure created successfully!")
