@@ -1,0 +1,23 @@
+# Core
+requests
+beautifulsoup4
+pandas
+numpy
+sqlalchemy
+python-dotenv
+
+# Web / dashboard
+streamlit
+flask
+
+# APIs & comms
+twilio
+openai
+tavily
+
+# ML / plotting (optional but useful)
+matplotlib
+scikit-learn
+
+# Testing
+pytest
