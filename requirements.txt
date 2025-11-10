@@ -1,23 +1,36 @@
-# Core
-requests
-beautifulsoup4
-pandas
-numpy
-sqlalchemy
-python-dotenv
+# Core runtime
+requests>=2.28
+beautifulsoup4>=4.11
+pandas>=1.5
+numpy>=1.23
+sqlalchemy>=1.4
+python-dotenv>=1.0
 
-# Web / dashboard
-streamlit
-flask
+# Web / dashboard / app
+flask>=2.2
+streamlit>=1.20
 
 # APIs & comms
-twilio
-openai
-tavily
+twilio>=8.0
+openai>=0.27
+tavily-python>=0.7.0
 
-# ML / plotting (optional but useful)
-matplotlib
-scikit-learn
+# ML / plotting / modeling
+matplotlib>=3.6
+scikit-learn>=1.2
 
-# Testing
-pytest
+# Document / artifacts
+python-docx>=0.8.11
+boto3>=1.26  # optional, needed if using S3 for LOIs/evidence
+
+# Testing & CI
+pytest>=7.0
+coverage>=6.0
+
+# Production server
+gunicorn>=20.1
+
+# Optional conveniences (safe to keep in single file or move to requirements-dev.txt)
+httpx>=0.24
+pydantic>=1.10
+uvicorn>=0.20.0
