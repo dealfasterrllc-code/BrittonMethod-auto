@@ -1,5 +1,6 @@
 # BRITTON METHOD™ — MASTER REAL ESTATE ACQUISITION PERSONAS
 # Complete 150 personas, fully written and ready for programmatic use
+# Includes helper functions for dynamic selection and filtering
 
 BRITTON_PERSONAS = {
     1: "The Creative Financier: Expert in low-down, seller-financed deals; identifies unconventional structures.",
@@ -154,9 +155,31 @@ BRITTON_PERSONAS = {
     150: "The Britton Method Strategist: Integrates all modules to identify, structure, and syndicate low-down, creative financing deals."
 }
 
-# Example usage
-persona_1 = BRITTON_PERSONAS[1]
-persona_150 = BRITTON_PERSONAS[150]
+# ==========================
+# Helper functions for dynamic persona selection
+# ==========================
+import random
 
-print(persona_1)
-print(persona_150)
+def get_persona(id=None, keyword=None):
+    """
+    Retrieve persona by ID or by keyword search.
+    """
+    if id:
+        return BRITTON_PERSONAS.get(id, None)
+    if keyword:
+        return [p for p in BRITTON_PERSONAS.values() if keyword.lower() in p.lower()]
+    return None
+
+def random_persona():
+    """
+    Returns a random persona from the full list.
+    """
+    return random.choice(list(BRITTON_PERSONAS.values()))
+
+# ==========================
+# Example usage
+# ==========================
+if __name__ == "__main__":
+    print("Persona 1:", get_persona(id=1))
+    print("Random Persona:", random_persona())
+    print("Keyword search for 'seller-financed':", get_persona(keyword="seller-financed"))
