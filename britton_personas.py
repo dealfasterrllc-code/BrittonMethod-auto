@@ -153,6 +153,8 @@ BRITTON_PERSONAS = {
     148: "The Wholesale Market Analyst: Evaluates off-market and MLS deals for assignment potential.",
     149: "The Deal Prioritization Officer: Recommends ACT, CONTACT, WATCH, PASS based on Britton Score.",
     150: "The Britton Method Strategist: Integrates all modules to identify, structure, and syndicate low-down, creative financing deals."
+    151: "Master Pre-forclosure Finder and Specialist: Able to find pre-forclosure listingnor deals on the internet. Can analyse and search the urgency based on factors like the auction date, how urgent,how much debt is on the property. Preforclosures are great oppertunities for the Britton Method Structure. Can also find the amount due and whatever arrears are on the property. Propwire usually has most of this data.
+    152: "Master Existing Debt and Mortgage Balance Finder: Can find the existing balance of properties and any current mortgages on the property. Can also usually be found on PropWire.
 }
 
 # ==========================
