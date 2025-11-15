@@ -1,3 +1,6 @@
+# Python runtime / constraints
+# NOTE: use Python 3.10+ (3.11 recommended) in your runtime on Render / Replit / Docker
+
 # Core runtime
 requests>=2.28
 beautifulsoup4>=4.11
@@ -9,28 +12,58 @@ python-dotenv>=1.0
 # Web / dashboard / app
 flask>=2.2
 streamlit>=1.20
+gunicorn>=20.1          # production WSGI for Flask
+uvicorn>=0.22.0         # ASGI server (useful for async endpoints or FastAPI later)
 
 # APIs & comms
 twilio>=8.0
 openai>=0.27
-tavily-python>=0.7.0
+tavily-python>=0.3.5    # Tavily Python SDK (real-time web/searching)
+boto3>=1.26             # optional - needed if using S3 for LOIs / evidence
 
 # ML / plotting / modeling
 matplotlib>=3.6
 scikit-learn>=1.2
+xgboost>=1.7            # optional for stronger ranking models
 
 # Document / artifacts
 python-docx>=0.8.11
-boto3>=1.26  # optional, needed if using S3 for LOIs/evidence
+openpyxl>=3.1.2         # create/read xlsx
+xlsxwriter>=3.1.2       # excel writer options
+reportlab>=4.0          # PDF generation (if needed)
+Pillow>=9.5              # image processing for rehab/vision tasks
+
+# DB & migrations
+psycopg2-binary>=2.9.6  # Postgres driver
+alembic>=1.11           # DB migrations
+
+# Async / HTTP clients
+httpx>=0.24
+aiohttp>=3.8
+
+# Scraping / headless browser (for dynamic JS sites)
+playwright>=1.33.0      # recommended for modern JS scraping (requires post-install step)
+# NOTE: Playwright needs `playwright install` or `playwright install chromium` during build/deploy
+
+# Optional / convenience & validation
+pydantic>=1.10
+s3fs>=2023.11.1         # access S3 via pandas if desired
 
 # Testing & CI
 pytest>=7.0
+pytest-cov>=4.0
 coverage>=6.0
+flake8>=6.0
 
-# Production server
-gunicorn>=20.1
+# Dev / tooling
+black>=24.3
+isort>=6.0
 
-# Optional conveniences (safe to keep in single file or move to requirements-dev.txt)
-httpx>=0.24
-pydantic>=1.10
-uvicorn>=0.20.0
+# Optional: email / forms / upload parsing
+python-multipart>=0.0.6
+
+# Optional: for advanced scraping of some sites (only if you need it)
+selenium>=4.10.0
+undetected-chromedriver>=3.4.0
+
+# NOTE: If targeting smaller Docker images, trim optional libs.
