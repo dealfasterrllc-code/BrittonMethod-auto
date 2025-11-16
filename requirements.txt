@@ -35,7 +35,8 @@ twilio>=8.0
 
 # === AWS / storage / S3 ===
 boto3>=1.26
-s3fs>=2023.11.1
+s3fs==2023.12.1          # pinned stable version
+fsspec==2023.12.1        # pinned to match s3fs
 
 # === Documents & reporting ===
 python-docx>=0.8.11
@@ -98,10 +99,7 @@ isort>=6.0
 # === Optional convenience / integrations ===
 python-multipart>=0.0.6
 
-# === Optional for advanced data processing / Excel ===
-s3fs>=2023.11.1
-
 # === Notes ===
 # - Playwright requires browser binaries; run: `python -m playwright install chromium` after installing.
 # - If building a small production image, remove optional heavy libs (selenium, xgboost, torch, streamlit, playwright).
-# - For reproducible builds consider pinning exact versions (package==x.y.z).
+# - Pinned s3fs/fsspec versions prevent Render deploy failures with Python 3.11.
