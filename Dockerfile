@@ -1,13 +1,20 @@
-# ---------- Builder ----------
+# ---------- Builder stage ----------
 FROM python:3.11-slim AS builder
 
-# system deps needed for Playwright + Chromium and common build tools
+LABEL maintainer="DealFasterr / BrittonMethod"
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    LANG=C.UTF-8 \
+    VENV_PATH=/opt/venv
+
+# Install system deps for building wheels and Playwright runtime libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ca-certificates \
     curl \
     wget \
     gnupg \
-    ca-certificates \
+    git \
     libnss3 \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
@@ -29,22 +36,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# copy only what's needed to install deps (cache layer)
-COPY requirements.txt .
+# Copy only dependency file first for caching
+COPY requirements.txt /app/requirements.txt
 
-ENV PIP_NO_CACHE_DIR=1 \
-    POETRY_VIRTUALENVS_CREATE=false
+# Create virtualenv and install dependencies there (isolated)
+RUN python -m venv ${VENV_PATH} \
+    && ${VENV_PATH}/bin/pip install --upgrade pip setuptools wheel \
+    && ${VENV_PATH}/bin/pip install --no-cache-dir -r /app/requirements.txt
 
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+# Install Playwright browsers (chromium). Use --with-deps to let Playwright attempt to install system deps if available.
+# Doing this in builder ensures all browser binaries are present and cached in venv.
+RUN ${VENV_PATH}/bin/python -m playwright install --with-deps chromium
 
-# Install Playwright browsers (chromium). This must be done after pip install playwright
-RUN python -m playwright install chromium
+# ---------- Runtime stage ----------
+FROM python:3.11-slim AS runtime
 
-# ---------- Runtime ----------
-FROM python:3.11-slim
+LABEL maintainer="DealFasterr / BrittonMethod"
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    LANG=C.UTF-8 \
+    VENV_PATH=/opt/venv \
+    PORT=10000
 
-# Minimal runtime deps for chromium
+# Install minimal runtime libs needed for Chromium and tini
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 \
     libatk1.0-0 \
@@ -63,26 +77,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-xcb1 \
     libxss1 \
     libxtst6 \
+    tini \
+    curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy installed site-packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy the venv from builder
+COPY --from=builder /opt/venv /opt/venv
+
+# Ensure venv executables are on PATH
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy application code
 COPY . /app
 
-# Create a non-root user for safety
-RUN useradd --create-home appuser && chown -R appuser:appuser /app
+# Create non-root user and chown app and venv
+RUN useradd --create-home --shell /bin/bash appuser \
+    && chown -R appuser:appuser /app /opt/venv
+
 USER appuser
 
-ENV PYTHONUNBUFFERED=1
-ENV PORT=10000
-
-# Gunicorn recommended; hit the same module entry as you have (Main:app)
+# Expose port for web service
 EXPOSE ${PORT}
 
-# Use a default command; Render/other platforms can override
-CMD ["gunicorn", "Main:app", "--bind", "0.0.0.0:10000", "--workers", "3", "--timeout", "120"]
+# Healthcheck to ensure the web service is responsive
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:${PORT}/health || exit 1
+
+# Use tini as entrypoint to forward signals properly
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Default command: Gunicorn serving the Flask app (Main:app)
+# Override CMD to run a worker (see docs below).
+CMD ["gunicorn", "Main:app", "--bind", "0.0.0.0:10000", "--workers", "3", "--threads", "4", "--timeout", "120", "--log-level", "info"]
