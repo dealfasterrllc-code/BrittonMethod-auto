@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     VENV_PATH=/opt/venv
 
-# Install system deps for building wheels and Playwright runtime libs
+# System deps for building wheels / Playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
@@ -37,15 +37,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy dependency file for caching
+# Copy dependency file
 COPY requirements.txt /app/requirements.txt
 
-# Create virtualenv and install dependencies
+# Create venv and install Python deps
 RUN python -m venv ${VENV_PATH} \
     && ${VENV_PATH}/bin/pip install --upgrade pip setuptools wheel \
     && ${VENV_PATH}/bin/pip install --no-cache-dir -r /app/requirements.txt
 
-# Install Playwright browsers (chromium) in builder stage
+# Install Playwright browsers (chromium) if needed
 RUN ${VENV_PATH}/bin/python -m playwright install --with-deps chromium
 
 # ---------- Runtime stage ----------
@@ -57,9 +57,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
     VENV_PATH=/opt/venv \
-    PORT=10000
+    PORT=10000 \
+    EVIDENCE_DIR=/tmp/britton_evidence
 
-# Install minimal runtime libs for Chromium and tini
+# Minimal runtime libs for Chromium / tini
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 \
     libatk1.0-0 \
@@ -86,28 +87,29 @@ WORKDIR /app
 
 # Copy virtualenv from builder
 COPY --from=builder /opt/venv /opt/venv
-
-# Ensure venv executables are on PATH
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy application code
+# Copy app code
 COPY . /app
 
-# Create non-root user and set permissions
+# Create non-root user
 RUN useradd --create-home --shell /bin/bash appuser \
-    && chown -R appuser:appuser /app /opt/venv
+    && chown -R appuser:appuser /app /opt/venv /tmp/britton_evidence
 
 USER appuser
 
-# Expose the dynamic port
+# Persist evidence directory
+VOLUME /tmp/britton_evidence
+
+# Expose port
 EXPOSE ${PORT}
 
-# Healthcheck for Render
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:${PORT}/health || exit 1
 
-# Use tini as entrypoint for proper signal handling
+# Use tini for signal handling
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Run Gunicorn using dynamic Render port
-CMD gunicorn Main:app --bind 0.0.0.0:$PORT --workers 3 --threads 4 --timeout 120 --log-level info
+# Gunicorn
+CMD gunicorn main:app --bind 0.0.0.0:$PORT --workers 3 --threads 4 --timeout 120 --log-level info
