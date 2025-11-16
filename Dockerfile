@@ -2,6 +2,7 @@
 FROM python:3.11-slim AS builder
 
 LABEL maintainer="DealFasterr / BrittonMethod"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
@@ -36,10 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy only dependency file first for caching
+# Copy dependency file for caching
 COPY requirements.txt /app/requirements.txt
 
-# Create virtualenv and install dependencies there (isolated)
+# Create virtualenv and install dependencies
 RUN python -m venv ${VENV_PATH} \
     && ${VENV_PATH}/bin/pip install --upgrade pip setuptools wheel \
     && ${VENV_PATH}/bin/pip install --no-cache-dir -r /app/requirements.txt
@@ -51,6 +52,7 @@ RUN ${VENV_PATH}/bin/python -m playwright install --with-deps chromium
 FROM python:3.11-slim AS runtime
 
 LABEL maintainer="DealFasterr / BrittonMethod"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
@@ -82,7 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy the venv from builder
+# Copy virtualenv from builder
 COPY --from=builder /opt/venv /opt/venv
 
 # Ensure venv executables are on PATH
@@ -97,15 +99,15 @@ RUN useradd --create-home --shell /bin/bash appuser \
 
 USER appuser
 
-# Expose port for web service
+# Expose the dynamic port
 EXPOSE ${PORT}
 
-# Healthcheck to ensure the web service is responsive
+# Healthcheck for Render
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:${PORT}/health || exit 1
 
-# Use tini as entrypoint to forward signals properly
+# Use tini as entrypoint for proper signal handling
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Default command: Gunicorn serving the Flask app (Main:app)
-CMD ["gunicorn", "Main:app", "--bind", "0.0.0.0:10000", "--workers", "3", "--threads", "4", "--timeout", "120", "--log-level", "info"]
+# Run Gunicorn using dynamic Render port
+CMD gunicorn Main:app --bind 0.0.0.0:$PORT --workers 3 --threads 4 --timeout 120 --log-level info
