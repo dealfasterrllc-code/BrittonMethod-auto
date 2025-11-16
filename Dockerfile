@@ -44,8 +44,7 @@ RUN python -m venv ${VENV_PATH} \
     && ${VENV_PATH}/bin/pip install --upgrade pip setuptools wheel \
     && ${VENV_PATH}/bin/pip install --no-cache-dir -r /app/requirements.txt
 
-# Install Playwright browsers (chromium). Use --with-deps to let Playwright attempt to install system deps if available.
-# Doing this in builder ensures all browser binaries are present and cached in venv.
+# Install Playwright browsers (chromium) in builder stage
 RUN ${VENV_PATH}/bin/python -m playwright install --with-deps chromium
 
 # ---------- Runtime stage ----------
@@ -58,7 +57,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VENV_PATH=/opt/venv \
     PORT=10000
 
-# Install minimal runtime libs needed for Chromium and tini
+# Install minimal runtime libs for Chromium and tini
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 \
     libatk1.0-0 \
@@ -92,7 +91,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Copy application code
 COPY . /app
 
-# Create non-root user and chown app and venv
+# Create non-root user and set permissions
 RUN useradd --create-home --shell /bin/bash appuser \
     && chown -R appuser:appuser /app /opt/venv
 
@@ -109,5 +108,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # Default command: Gunicorn serving the Flask app (Main:app)
-# Override CMD to run a worker (see docs below).
 CMD ["gunicorn", "Main:app", "--bind", "0.0.0.0:10000", "--workers", "3", "--threads", "4", "--timeout", "120", "--log-level", "info"]
