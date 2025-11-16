@@ -1,0 +1,107 @@
+# ---------- .render.yaml ----------
+# BrittonMethod API - Production-ready Render configuration
+# Author: DealFasterr / BrittonMethod
+# Description: Web service using Docker, Gunicorn, background worker queue, and evidence persistence
+
+services:
+  - type: web
+    name: BrittonMethod-API
+    env: docker
+    plan: starter
+    # Path to your Dockerfile
+    dockerfilePath: Dockerfile
+    # Port Render should bind
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: BRITTON_API_KEY
+        fromDatabase: true
+      - key: OPENAI_API_KEY
+        fromDatabase: true
+      - key: ATTOM_API_KEY
+        fromDatabase: true
+      - key: TWILIO_SID
+        fromDatabase: true
+      - key: TWILIO_AUTH
+        fromDatabase: true
+      - key: REDIS_URL
+        fromDatabase: true
+      - key: DATABASE_URL
+        fromDatabase: true
+      - key: USE_S3
+        value: "false"
+      - key: S3_BUCKET
+        value: ""
+      - key: HUMAN_IN_LOOP_VALUE
+        value: "50000000"
+      - key: CONFIDENCE_THRESHOLD
+        value: "0.7"
+      - key: MAX_VERIFICATION_ATTEMPTS
+        value: "10"
+      - key: EVIDENCE_DIR
+        value: "/tmp/britton_evidence"
+    # Optional build environment variables
+    buildCommand: "echo 'Building BrittonMethod Docker image...'"
+    startCommand: "gunicorn main:app --bind 0.0.0.0:$PORT --workers 3 --threads 4 --timeout 120 --log-level info"
+    healthCheckPath: "/health"
+    healthCheckInterval: 30
+    healthCheckTimeout: 5
+    healthCheckRetries: 3
+    # Persistent volume for evidence storage
+    disk:
+      mountPath: /tmp/britton_evidence
+      sizeGB: 1
+    # Auto-deploy from GitHub / GitLab repository
+    autoDeploy: true
+    branch: main
+    # Optional secrets management
+    secrets:
+      - BRITTON_API_KEY
+      - OPENAI_API_KEY
+      - ATTOM_API_KEY
+      - TWILIO_SID
+      - TWILIO_AUTH
+      - REDIS_URL
+      - DATABASE_URL
+
+  # Optional background worker (if you want async tasks isolated)
+  - type: worker
+    name: BrittonMethod-Worker
+    env: docker
+    plan: starter
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: PORT
+        value: "10001" # Not used for worker, just placeholder
+      - key: BRITTON_API_KEY
+        fromDatabase: true
+      - key: OPENAI_API_KEY
+        fromDatabase: true
+      - key: ATTOM_API_KEY
+        fromDatabase: true
+      - key: TWILIO_SID
+        fromDatabase: true
+      - key: TWILIO_AUTH
+        fromDatabase: true
+      - key: REDIS_URL
+        fromDatabase: true
+      - key: DATABASE_URL
+        fromDatabase: true
+      - key: USE_S3
+        value: "false"
+      - key: S3_BUCKET
+        value: ""
+      - key: HUMAN_IN_LOOP_VALUE
+        value: "50000000"
+      - key: CONFIDENCE_THRESHOLD
+        value: "0.7"
+      - key: MAX_VERIFICATION_ATTEMPTS
+        value: "10"
+      - key: EVIDENCE_DIR
+        value: "/tmp/britton_evidence"
+    startCommand: "python main.py" # Runs the in-process worker thread
+    disk:
+      mountPath: /tmp/britton_evidence
+      sizeGB: 1
+    autoDeploy: true
+    branch: main
