@@ -1,0 +1,56 @@
+version: "3.8"
+
+services:
+  web:
+    build: .
+    container_name: britton_web
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "10000:10000"
+    environment:
+      - PORT=10000
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/britton
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - USE_S3=false
+    volumes:
+      - .:/app
+    tty: true
+
+  worker:
+    build: .
+    container_name: britton_worker
+    command: ["python", "workers/worker_main.py"]
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/britton
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - .:/app
+    tty: true
+
+  redis:
+    image: redis:7-alpine
+    container_name: britton_redis
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: britton_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: britton
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  pgdata:
