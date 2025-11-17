@@ -270,6 +270,44 @@ def require_api_key():
         return True
     abort(401, description="Missing or invalid API key.")
 
+def get_payload() -> Dict[str, Any]:
+    """
+    Safely parse incoming request body into a dict.
+    Accepts:
+    - JSON body (object)
+    - Raw text body (treated as {"prompt": "raw text"})
+    - JSON encoded as plain text
+    - For GET, query params will be consulted by endpoints if needed
+    """
+    # try proper JSON first (silent to avoid exceptions)
+    p = request.get_json(silent=True)
+    if p is None:
+        raw = request.get_data(as_text=True) or ""
+        raw = raw.strip()
+        if raw == "":
+            return {}
+        # try to parse raw as JSON
+        try:
+            parsed = json.loads(raw)
+            # if parsed is a string, wrap
+            if isinstance(parsed, str):
+                return {"prompt": parsed}
+            if isinstance(parsed, dict):
+                return parsed
+            # if parsed is a list or other, return as raw under a key
+            return {"_raw": parsed}
+        except Exception:
+            # treat raw text as prompt
+            return {"prompt": raw}
+    # if p is a string (some clients), wrap as prompt
+    if isinstance(p, str):
+        return {"prompt": p}
+    # if p is dict-like, return as-is
+    if isinstance(p, dict):
+        return p
+    # fallback
+    return {"_raw": str(p)}
+
 def enqueue_job(job_type: str, payload: Dict[str, Any], run_monte_carlo: bool = True, mc_runs: int = 2000) -> str:
     job_id = str(uuid.uuid4())
     JOB_STORE[job_id] = {"created": datetime.utcnow().isoformat() + "Z", "status": "queued", "payload": payload}
@@ -390,9 +428,12 @@ def health():
 def analyze_route():
     if API_KEY:
         require_api_key()
-    payload = request.json or {}
-    prop = payload.get("property", payload)
+    payload = get_payload()
+    # support both {"property": {...}} and direct property object
+    prop = payload.get("property") if isinstance(payload, dict) else None
     if not prop:
+        prop = payload
+    if not prop or (isinstance(prop, dict) and not prop):
         return jsonify({"ok": False, "error": "missing property"}), 400
     job_id = enqueue_job("analyze", prop, run_monte_carlo=bool(payload.get("run_monte_carlo", True)), mc_runs=int(payload.get("mc_runs", 2000)))
     return jsonify({"ok": True, "job_id": job_id}), 202
@@ -401,9 +442,11 @@ def analyze_route():
 def verify_route():
     if API_KEY:
         require_api_key()
-    payload = request.json or {}
-    listing = payload.get("listing", payload)
+    payload = get_payload()
+    listing = payload.get("listing") if isinstance(payload, dict) else None
     if not listing:
+        listing = payload
+    if not listing or (isinstance(listing, dict) and not listing):
         return jsonify({"ok": False, "error": "missing listing"}), 400
     job_id = enqueue_job("verify", listing, run_monte_carlo=False)
     return jsonify({"ok": True, "job_id": job_id}), 202
@@ -412,13 +455,14 @@ def verify_route():
 def loi_route():
     if API_KEY:
         require_api_key()
-    payload = request.json or {}
-    prop = payload.get("property", payload)
+    payload = get_payload()
+    prop = payload.get("property") if isinstance(payload, dict) else payload
     if not prop:
         return jsonify({"ok": False, "error": "missing property"}), 400
     # sanitize/remove internal-only keys
     for k in ("britton_score", "confidence", "internal_notes", "evidence_manifest"):
-        prop.pop(k, None)
+        if isinstance(prop, dict):
+            prop.pop(k, None)
     try:
         loi = generate_long_loi_text(prop)
     except Exception as e:
@@ -434,7 +478,8 @@ def loi_route():
 def waterfall_route():
     if API_KEY:
         require_api_key()
-    payload = request.json or {}
+    payload = get_payload()
+    # allow direct payload with price + existing_debt + investor_equity_pct
     price = payload.get("price")
     existing_debt = payload.get("existing_debt", 0)
     g = payload.get("investor_equity_pct", 0.25)
@@ -445,8 +490,8 @@ def waterfall_route():
 
 @app.route("/webhook/email", methods=["POST"])
 def webhook_email():
-    data = request.json or {}
-    parsed = data.get("parsed")
+    payload = get_payload()
+    parsed = payload.get("parsed") if isinstance(payload, dict) else None
     if not parsed:
         return jsonify({"ok": False, "error": "no parsed property"}), 400
     verify_job_id = enqueue_job("verify", parsed, run_monte_carlo=False)
@@ -457,8 +502,8 @@ def webhook_email():
 def persona_route():
     if API_KEY:
         require_api_key()
-    payload = request.json or {}
-    max_personas = int(payload.get("max_personas", 8))
+    payload = get_payload()
+    max_personas = int(payload.get("max_personas", 8)) if isinstance(payload, dict) else 8
     if assign_persona_stack:
         try:
             stack = assign_persona_stack(payload, max_personas=max_personas)
@@ -528,56 +573,69 @@ def shutdown():
     return jsonify({"ok": True, "message": "shutdown queued"}), 200
 
 # --- Natural-language (Chat-like) endpoint ---
-@app.route("/nlp", methods=["POST"])
+@app.route("/nlp", methods=["POST", "GET"])
 def nlp_route():
     """
-    POST /nlp
-    Body JSON:
-    {
-      "prompt": "Explain the risk on this deal...",
-      "model": "gpt-4o-mini",          # optional
-      "max_tokens": 512,              # optional
-      "temperature": 0.0              # optional
-    }
-    Requires BRITTON_API_KEY if set. Requires OPENAI_API_KEY in env to call real OpenAI.
+    Flexible /nlp endpoint:
+    - POST JSON: {"prompt": "...", "model": "...", "max_tokens": 512, "temperature": 0.0}
+    - POST raw text body: "Hello AI..."
+    - GET: /nlp?prompt=Hello+AI
+    - If BRITTON_API_KEY is set in env, requires X-API-KEY header or ?api_key=
+    - If OPENAI_API_KEY present and openai package installed, will call OpenAI.
+    - Otherwise returns a deterministic helpful fallback response.
     """
     if API_KEY:
         require_api_key()
 
-    payload = request.json or {}
-    prompt = payload.get("prompt") or payload.get("query") or ""
+    payload = get_payload()  # robust parse (json, raw, json-as-text)
+    # If GET and payload empty, allow prompt from query param
+    if request.method == "GET" and not payload:
+        prompt = request.args.get("prompt") or request.args.get("q") or ""
+        payload = {"prompt": prompt} if prompt else {}
+    # ensure payload is dict
+    if not isinstance(payload, dict):
+        payload = {"_raw": str(payload)}
+
+    prompt = (payload.get("prompt") or payload.get("query") or "") if isinstance(payload, dict) else ""
+    # allow clients that send bare string body as the payload directly earlier; get_payload covers that
     if not prompt:
         return jsonify({"ok": False, "error": "missing prompt"}), 400
 
     model = payload.get("model", "gpt-4o-mini" if OPENAI_AVAILABLE else "fallback")
-    max_tokens = int(payload.get("max_tokens", 512))
-    temperature = float(payload.get("temperature", 0.0))
+    max_tokens = int(payload.get("max_tokens", 512)) if payload.get("max_tokens") is not None else 512
+    temperature = float(payload.get("temperature", 0.0)) if payload.get("temperature") is not None else 0.0
 
-    # If OpenAI key available & openai package installed -> call OpenAI
+    logger.info("NLP request model=%s prompt_len=%d", model, len(prompt))
+
+    # If OpenAI available & key present -> call OpenAI
     if OPENAI_KEY and OPENAI_AVAILABLE:
         try:
             openai.api_key = OPENAI_KEY
-            # prefer ChatCompletion if available
             try:
+                # prefer chat completion
                 resp = openai.ChatCompletion.create(
                     model=model,
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=max_tokens,
                     temperature=temperature,
                 )
-                # extract assistant text
                 text = ""
                 if isinstance(resp, dict):
                     choices = resp.get("choices") or []
                     if choices:
-                        # ChatCompletion structure
-                        msg = choices[0].get("message") if choices[0].get("message") else {}
-                        text = msg.get("content") or choices[0].get("text") or ""
+                        # ChatCompletion structure check
+                        first = choices[0]
+                        if isinstance(first, dict):
+                            msg = first.get("message")
+                            if isinstance(msg, dict):
+                                text = msg.get("content") or ""
+                            else:
+                                text = first.get("text") or ""
                 if not text:
-                    text = json.dumps(resp)
+                    text = str(resp)
                 return jsonify({"ok": True, "model": model, "response": text}), 200
             except Exception:
-                # fallback to completions endpoint
+                # fallback to completions API
                 resp = openai.Completion.create(
                     engine=model,
                     prompt=prompt,
@@ -590,16 +648,19 @@ def nlp_route():
                     if choices:
                         text = choices[0].get("text") or ""
                 if not text:
-                    text = json.dumps(resp)
+                    text = str(resp)
                 return jsonify({"ok": True, "model": model, "response": text}), 200
         except Exception as e:
             logger.exception("OpenAI call failed")
             return jsonify({"ok": False, "error": f"OpenAI call failed: {str(e)}"}), 500
 
-    # If OpenAI not available: provide a deterministic helpful fallback
+    # Fallback local assistant (deterministic)
     try:
-        # Very simple local "assistant" — not an LLM. Useful for testing without keys.
-        fallback = f"(fallback) Echoing prompt: {prompt}\n\nHints:\n- To enable real responses, set OPENAI_API_KEY in environment variables.\n- Use the 'model' key to pick a model when available."
+        fallback = (
+            f"(fallback) Echoing prompt: {prompt}\n\n"
+            "- To enable real responses, set OPENAI_API_KEY in environment variables and ensure 'openai' package is installed.\n"
+            "- You can supply JSON: {\"prompt\": \"...\"}, or send raw text in body, or GET /nlp?prompt=...\n"
+        )
         return jsonify({"ok": True, "model": "fallback", "response": fallback}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
