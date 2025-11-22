@@ -1,14 +1,29 @@
 # app_core.py
 """
 app_core.py — helper implementations for Britton Method
-Provides:
-- store_evidence_binary (with optional S3 upload)
-- underwriter_deterministic
-- monte_carlo_simulation (numpy optional)
-- simulate_refund_waterfall
-- verify_listing_pipeline + checks (stubs)
-- generate_long_loi_text (OpenAI integration + fallback)
-- LLM_PROMPT loader from prompts directory
+
+Features:
+- Evidence storage (disk + optional S3)
+- Underwriter deterministic math & Britton Score
+- Monte Carlo simulation (numpy optional)
+- Refund waterfall simulation
+- Listing verification pipeline (stubs with evidence capture)
+- Robust multi-provider LLM wrapper:
+    DeepSeek -> Groq -> OpenAI -> local transformers model -> deterministic fallback
+  with retry/backoff and environment-driven provider URLs & keys.
+- LOI generator using the provider chain + deterministic fallback
+
+Env vars used (recommended):
+- EVIDENCE_DIR, USE_S3, S3_BUCKET, S3_REGION
+- DEEPSEEK_API_KEY, DEEPSEEK_API_URL
+- GROQ_API_KEY, GROQ_API_URL
+- OPENAI_API_KEY
+- GEMINI_KEY, GEMINI_API_URL
+- MODEL_PROVIDER_PRIMARY (optional), MODEL_PROVIDER_SECONDARY, MODEL_PROVIDER_TERTIARY
+- LOCAL_LLM_MODEL (optional e.g. "mosaicml/mpt-7b-instruct")
+- ATTOM_KEY / ATTOM_API_KEY
+- TWILIO_SID / TWILIO_API_SID, TWILIO_AUTH / TWILIO_API_SECRET
+- TAVILY_API_KEY
 """
 
 import os
@@ -16,10 +31,12 @@ import json
 import hashlib
 import uuid
 import sys
+import time
+import traceback
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
-# Optional deps
+# Optional libs (guarded)
 try:
     import requests
 except Exception:
@@ -34,36 +51,73 @@ try:
     import numpy as np
     NUMPY_AVAILABLE = True
 except Exception:
+    np = None
     NUMPY_AVAILABLE = False
 
+# OpenAI: support both legacy openai package and new OpenAI client if available
 try:
-    import openai
-    OPENAI_AVAILABLE = True
+    import openai as _legacy_openai
+    OPENAI_LEGACY = True
 except Exception:
-    openai = None
-    OPENAI_AVAILABLE = False
+    _legacy_openai = None
+    OPENAI_LEGACY = False
 
-# Environment / config (match names used in Main.py)
+try:
+    # new OpenAI client class usually `openai` too; guard by trying to import OpenAI from openai
+    from openai import OpenAI as OpenAIClient  # type: ignore
+    OPENAI_NEW = True
+except Exception:
+    OpenAIClient = None
+    OPENAI_NEW = False
+
+# Transformers local model (optional)
+try:
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    import torch
+    TRANSFORMERS_AVAILABLE = True
+except Exception:
+    AutoTokenizer = None
+    AutoModelForCausalLM = None
+    torch = None
+    TRANSFORMERS_AVAILABLE = False
+
+# -----------------------
+# Environment / defaults
+# -----------------------
 EVIDENCE_DIR = os.environ.get("EVIDENCE_DIR", "/tmp/britton_evidence")
+os.makedirs(EVIDENCE_DIR, exist_ok=True)
+
 USE_S3 = os.environ.get("USE_S3", "false").lower() in ("1", "true", "yes")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 S3_REGION = os.environ.get("S3_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 
-# Map render env names to expected internal names (support both ATTOM_KEY and ATTOM_API_KEY)
-ATTOM_API_KEY = os.environ.get("ATTOM_KEY", "") or os.environ.get("ATTOM_API_KEY", "")
-TWILIO_API_SID = os.environ.get("TWILIO_API_SID", "") or os.environ.get("TWILIO_SID", "")
-TWILIO_API_SECRET = os.environ.get("TWILIO_API_SECRET", "") or os.environ.get("TWILIO_AUTH", "")
-TWILIO_FROM = os.environ.get("TWILIO_FROM", "")
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
+# API Keys & endpoints
+DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "") or os.environ.get("DEEPLSEEK_API_KEY", "")
+DEEPSEEK_URL = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.ai/v1/generate")
+
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "") or os.environ.get("GROQ_KEY", "")
+GROQ_URL = os.environ.get("GROQ_API_URL", "https://api.groq.com/v1/completions")
+
+OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("OPENAI_KEY", "")
 GEMINI_KEY = os.environ.get("GEMINI_KEY", "") or os.environ.get("GEMINI_TOKEN", "")
+GEMINI_URL = os.environ.get("GEMINI_API_URL", "")
+
+MODEL_PROVIDER_PRIMARY = os.environ.get("MODEL_PROVIDER_PRIMARY", "DEEPSEEK").upper()
+MODEL_PROVIDER_SECONDARY = os.environ.get("MODEL_PROVIDER_SECONDARY", "GROQ").upper()
+MODEL_PROVIDER_TERTIARY = os.environ.get("MODEL_PROVIDER_TERTIARY", "OPENAI").upper()
+
+# Local LLM settings
+LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "mosaicml/mpt-7b-instruct")
+LOCAL_LLM_MAX_TOKENS = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "2048"))
+
+# Other keys mapping
+ATTOM_API_KEY = os.environ.get("ATTOM_KEY", "") or os.environ.get("ATTOM_API_KEY", "")
+TWILIO_API_SID = os.environ.get("TWILIO_SID", "") or os.environ.get("TWILIO_API_SID", "")
+TWILIO_API_SECRET = os.environ.get("TWILIO_AUTH", "") or os.environ.get("TWILIO_API_SECRET", "")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "") or os.environ.get("TAVILY_KEY", "")
 
-# prompt loader path
+# Prompt loader (optional)
 PROMPT_PATH = os.path.join("prompts", "britton_underwriter_master.py")
-
-os.makedirs(EVIDENCE_DIR, exist_ok=True)
-
-# load LLM prompt if present
 LLM_PROMPT = None
 if os.path.exists(PROMPT_PATH):
     try:
@@ -75,17 +129,19 @@ if os.path.exists(PROMPT_PATH):
     except Exception:
         LLM_PROMPT = None
 
-# --- utility helpers ---
+# -----------------------
+# Utilities
+# -----------------------
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
-def append_manifest(record: Dict[str, Any]):
+def append_manifest(record: Dict[str, Any]) -> None:
     mf = os.path.join(EVIDENCE_DIR, "manifest.jsonl")
     try:
         with open(mf, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
     except Exception:
-        # best-effort; do not fail the main flow
+        # best-effort, never raise
         pass
 
 def _s3_upload(local_path: str, s3_bucket: str, s3_key: str, region: str = "us-east-1") -> bool:
@@ -100,8 +156,8 @@ def _s3_upload(local_path: str, s3_bucket: str, s3_key: str, region: str = "us-e
 
 def store_evidence_binary(source: str, raw_bytes: bytes, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Writes binary evidence to disk, appends manifest line, and optionally uploads to S3.
-    Returns item dict.
+    Writes binary evidence locally, appends manifest line, optionally uploads to S3.
+    Returns an item dict with id and paths.
     """
     meta = meta or {}
     h = sha256_bytes(raw_bytes)
@@ -111,20 +167,12 @@ def store_evidence_binary(source: str, raw_bytes: bytes, meta: Optional[Dict[str
         with open(local_path, "wb") as f:
             f.write(raw_bytes)
     except Exception:
-        # If disk write fails, attempt to return the digest only
+        # if disk write fails, still return digest info
         item = {"id": h, "source": source, "sha256": h, "size": len(raw_bytes), "timestamp": datetime.utcnow().isoformat() + "Z", "local_path": None, "meta": meta}
         append_manifest(item)
         return item
 
-    item = {
-        "id": h,
-        "source": source,
-        "sha256": h,
-        "size": len(raw_bytes),
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "local_path": local_path,
-        "meta": meta
-    }
+    item = {"id": h, "source": source, "sha256": h, "size": len(raw_bytes), "timestamp": datetime.utcnow().isoformat() + "Z", "local_path": local_path, "meta": meta}
     append_manifest(item)
 
     if USE_S3 and S3_BUCKET:
@@ -135,9 +183,12 @@ def store_evidence_binary(source: str, raw_bytes: bytes, meta: Optional[Dict[str
                 item["s3_key"] = s3_key
         except Exception:
             pass
+
     return item
 
-# --- Underwriter math & Britton Score ---
+# -----------------------
+# Underwriter math
+# -----------------------
 def compute_britton_score(noi, price, dscr, equity_gap, prop_meta):
     try:
         cashflow = (noi / price) if price > 0 else 0.0
@@ -187,7 +238,7 @@ def underwriter_deterministic(prop: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def monte_carlo_simulation(prop: Dict[str, Any], runs: int = 2000) -> Dict[str, Any]:
-    # If numpy not present, fallback to deterministic single-run
+    # deterministic fallback if numpy not available
     if not NUMPY_AVAILABLE:
         det = underwriter_deterministic(prop)
         return {
@@ -241,16 +292,11 @@ def simulate_refund_waterfall(price: float, existing_debt: float, investor_equit
         out.update({"seller_carry_required": seller_carry, "structure": "seller_carryback"})
     return out
 
-# --- Verify pipeline & checks (stubs with evidence storage) ---
+# -----------------------
+# Verify pipeline (stubs)
+# -----------------------
 def verify_listing_pipeline(listing: Dict[str, Any], attempts: int = 5, require_checks: int = 5) -> Dict[str, Any]:
-    manifest = {
-        "id": str(uuid.uuid4()),
-        "created": datetime.utcnow().isoformat() + "Z",
-        "requested_attempts": attempts,
-        "required_checks": require_checks,
-        "checks": [],
-        "evidence": []
-    }
+    manifest = {"id": str(uuid.uuid4()), "created": datetime.utcnow().isoformat() + "Z", "requested_attempts": attempts, "required_checks": require_checks, "checks": [], "evidence": []}
     passed = 0
     check_fns = [
         check_primary_listing_active, check_county_record_match, check_tax_lien_status,
@@ -267,7 +313,6 @@ def verify_listing_pipeline(listing: Dict[str, Any], attempts: int = 5, require_
             result = fn(listing)
             result["attempt"] = attempts_made
             manifest["checks"].append(result)
-            # extend evidence items into manifest.evidence
             manifest["evidence"].extend(result.get("evidence_items", []))
             if result.get("passed"):
                 passed += 1
@@ -275,7 +320,6 @@ def verify_listing_pipeline(listing: Dict[str, Any], attempts: int = 5, require_
         except Exception as e:
             manifest["checks"].append({"check": fn.__name__, "passed": False, "error": str(e)})
             i += 1
-
     confidence = min(1.0, passed / float(require_checks)) if require_checks > 0 else 0.0
     label = "VERIFIED" if passed >= require_checks else ("UNVERIFIED" if confidence < 0.5 else "PARTIAL")
     manifest.update({"passed_checks": passed, "confidence": confidence, "label": label})
@@ -375,147 +419,350 @@ def check_photo_and_image_for_condition(listing: Dict[str, Any]) -> Dict[str, An
     out["evidence_items"].append(ev)
     return out
 
-# --- OpenAI helper (v1.0+ compatible) ---
-def _get_openai_response(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 1024, temperature: float = 0.0) -> Dict[str, Any]:
+# -----------------------
+# LLM provider helpers
+# -----------------------
+
+def _retry_http_post(url: str, headers: Dict[str, str], payload: Dict[str, Any], retries: int = 5, backoff_base: float = 0.5, timeout: int = 30) -> Tuple[bool, Any]:
     """
-    Return {"ok": True, "response": text} or {"ok": False, "error": msg}
-    Defensive: tries modern openai.chat.completions.create, ChatCompletion.create, then legacy Completion.create
+    Helper: POST with retries and exponential backoff.
+    Returns (ok: bool, response_json_or_error)
     """
-    if not OPENAI_AVAILABLE or not OPENAI_KEY or not openai:
-        return {"ok": False, "error": "openai not installed or OPENAI_API_KEY missing"}
-
-    try:
-        openai.api_key = OPENAI_KEY
-    except Exception:
-        # best-effort
-        pass
-
-    resp = None
-    # try multiple call surfaces
-    if hasattr(openai, "chat") and hasattr(openai.chat, "completions"):
+    if not requests:
+        return False, {"error": "requests_not_installed"}
+    last_err = None
+    for attempt in range(retries):
         try:
-            resp = openai.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-        except Exception:
-            resp = None
-
-    if resp is None and hasattr(openai, "ChatCompletion") and hasattr(openai.ChatCompletion, "create"):
-        try:
-            resp = openai.ChatCompletion.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-        except Exception:
-            resp = None
-
-    if resp is None and hasattr(openai, "Completion") and hasattr(openai.Completion, "create"):
-        try:
-            resp = openai.Completion.create(
-                engine=model,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-        except Exception:
-            resp = None
-
-    if resp is None:
-        return {"ok": False, "error": "No supported OpenAI client method available (check openai lib version)"}
-
-    # parse response
-    try:
-        choices = None
-        if hasattr(resp, "choices"):
-            try:
-                choices = resp.choices
-            except Exception:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            if resp.status_code in (200, 201):
                 try:
-                    choices = resp.get("choices")
+                    return True, resp.json()
                 except Exception:
-                    choices = None
-        else:
-            try:
-                choices = resp.get("choices")
-            except Exception:
-                choices = None
+                    return True, resp.text
+            if resp.status_code in (429, 500, 502, 503):
+                wait = backoff_base * (2 ** attempt)
+                time.sleep(wait)
+                last_err = {"status_code": resp.status_code, "body": resp.text}
+                continue
+            # other non-success -> return body
+            return False, {"status_code": resp.status_code, "body": resp.text}
+        except requests.exceptions.RequestException as e:
+            last_err = {"exception": str(e)}
+            wait = backoff_base * (2 ** attempt)
+            time.sleep(wait)
+            continue
+    return False, {"error": "max_retries_exceeded", "last_err": last_err}
 
-        text = ""
-        if choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                # chat-style
-                msg = first.get("message") or first.get("delta") or {}
-                if isinstance(msg, dict):
-                    text = msg.get("content") or msg.get("text") or ""
-                if not text:
+def _call_deepseek(prompt: str, model: str = "deepseek-v3.2", max_tokens: int = 2000) -> Dict[str, Any]:
+    """
+    Call DeepSeek API. Returns {"ok": bool, "response": text, "raw": raw_json}
+    """
+    if not DEEPSEEK_KEY:
+        return {"ok": False, "error": "missing_deepseek_key"}
+    url = os.environ.get("DEEPSEEK_API_URL", DEEPSEEK_URL)
+    headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}", "Content-Type": "application/json"}
+    payload = {"model": model, "input": prompt, "max_tokens": max_tokens}
+    ok, res = _retry_http_post(url, headers, payload)
+    if not ok:
+        return {"ok": False, "error": "deepseek_failed", "detail": res}
+    # flexible parsing
+    text = ""
+    if isinstance(res, dict):
+        text = res.get("output") or res.get("output_text") or res.get("text") or res.get("result") or ""
+        # nested shapes sometimes have choices
+        if not text and "choices" in res:
+            try:
+                ch = res.get("choices", [])
+                if ch and isinstance(ch, list):
+                    first = ch[0]
+                    text = first.get("text") or first.get("message") or ""
+            except Exception:
+                pass
+    elif isinstance(res, str):
+        text = res
+    return {"ok": True, "response": text, "raw": res}
+
+def _call_groq(prompt: str, model: str = "llama-3.3-70b", max_tokens: int = 2000) -> Dict[str, Any]:
+    if not GROQ_KEY:
+        return {"ok": False, "error": "missing_groq_key"}
+    url = os.environ.get("GROQ_API_URL", GROQ_URL)
+    headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+    payload = {"model": model, "prompt": prompt, "max_tokens": max_tokens}
+    ok, res = _retry_http_post(url, headers, payload)
+    if not ok:
+        return {"ok": False, "error": "groq_failed", "detail": res}
+    text = ""
+    if isinstance(res, dict):
+        text = res.get("completion") or res.get("output") or res.get("text") or ""
+        if not text and "choices" in res:
+            try:
+                ch = res.get("choices", [])
+                if ch and isinstance(ch, list):
+                    first = ch[0]
                     text = first.get("text") or ""
-            else:
-                # object with attrs
-                try:
-                    msg = getattr(first, "message", None)
-                    if msg and hasattr(msg, "get"):
-                        text = msg.get("content") or ""
-                    elif msg and hasattr(msg, "content"):
-                        text = msg.content
-                    else:
-                        text = getattr(first, "text", "") or ""
-                except Exception:
-                    text = str(first)
-        else:
-            text = str(resp)
+            except Exception:
+                pass
+    elif isinstance(res, str):
+        text = res
+    return {"ok": True, "response": text, "raw": res}
 
-        if isinstance(text, bytes):
-            text = text.decode("utf-8", errors="replace")
-        if not text:
-            text = str(resp)
+def _call_openai_api(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 1024, temperature: float = 0.0) -> Dict[str, Any]:
+    """
+    Try to call OpenAI using either new OpenAI client or legacy openai package.
+    Returns {"ok": True, "response": text} or {"ok": False, "error": msg}
+    """
+    if not OPENAI_KEY:
+        return {"ok": False, "error": "missing_openai_key"}
+    # Prefer new OpenAI client if available
+    try:
+        if OPENAI_NEW and OpenAIClient is not None:
+            try:
+                client = OpenAIClient(api_key=OPENAI_KEY)  # new client
+                # Use responses.create if available
+                try:
+                    resp = client.responses.create(model=model, input=prompt, max_tokens=max_tokens)
+                    # response structure varies; try to extract output_text or output[0].content
+                    text = ""
+                    if hasattr(resp, "output_text"):
+                        text = getattr(resp, "output_text")
+                    else:
+                        # dict-like
+                        try:
+                            j = resp
+                            # attempt common shapes
+                            text = j.get("output_text") or (j.get("output") and j["output"][0].get("content")) or ""
+                        except Exception:
+                            text = str(resp)
+                    return {"ok": True, "response": text, "raw": resp}
+                except Exception:
+                    # fallback to chat completions style if responses.create not available
+                    try:
+                        resp = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], max_tokens=max_tokens, temperature=temperature)
+                        # parse
+                        text = ""
+                        if isinstance(resp, dict):
+                            choices = resp.get("choices") or []
+                            if choices:
+                                first = choices[0]
+                                msg = first.get("message") or {}
+                                text = msg.get("content") or first.get("text") or ""
+                        return {"ok": True, "response": text, "raw": resp}
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Try legacy openai package if present
+        if OPENAI_LEGACY and _legacy_openai is not None:
+            try:
+                _legacy_openai.api_key = OPENAI_KEY
+                # prefer chat completion route if exists
+                if hasattr(_legacy_openai, "ChatCompletion") and hasattr(_legacy_openai.ChatCompletion, "create"):
+                    resp = _legacy_openai.ChatCompletion.create(model=model, messages=[{"role": "user", "content": prompt}], max_tokens=max_tokens, temperature=temperature)
+                    # parse
+                    choices = getattr(resp, "choices", None) or (resp.get("choices") if isinstance(resp, dict) else None)
+                    text = ""
+                    if choices:
+                        first = choices[0]
+                        if isinstance(first, dict):
+                            msg = first.get("message") or {}
+                            text = msg.get("content") or first.get("text") or ""
+                        else:
+                            # attr object
+                            try:
+                                msg = getattr(first, "message", None)
+                                if msg and hasattr(msg, "get"):
+                                    text = msg.get("content") or ""
+                                else:
+                                    text = getattr(first, "text", "") or ""
+                            except Exception:
+                                text = str(first)
+                    else:
+                        text = str(resp)
+                    return {"ok": True, "response": text, "raw": resp}
+                # fallback to completions
+                if hasattr(_legacy_openai, "Completion") and hasattr(_legacy_openai.Completion, "create"):
+                    resp = _legacy_openai.Completion.create(engine=model, prompt=prompt, max_tokens=max_tokens, temperature=temperature)
+                    text = ""
+                    if isinstance(resp, dict):
+                        choices = resp.get("choices") or []
+                        if choices:
+                            text = choices[0].get("text") or ""
+                    return {"ok": True, "response": text, "raw": resp}
+            except Exception as e:
+                return {"ok": False, "error": "openai_call_exception", "detail": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": "openai_client_error", "detail": str(e)}
+
+    return {"ok": False, "error": "no_openai_client_available"}
+
+def _call_gemini(prompt: str, model: str = "gemini-2.5-pro", max_tokens: int = 1024) -> Dict[str, Any]:
+    """
+    Placeholder for Gemini; uses GEMINI_KEY and GEMINI_URL env vars if provided.
+    Implementation depends on provider shape; keep flexible.
+    """
+    if not GEMINI_KEY and not GEMINI_URL:
+        return {"ok": False, "error": "missing_gemini_config"}
+    url = GEMINI_URL or os.environ.get("GEMINI_API_URL")
+    headers = {"Authorization": f"Bearer {GEMINI_KEY}"} if GEMINI_KEY else {}
+    payload = {"prompt": prompt, "maxOutputTokens": max_tokens}
+    ok, res = _retry_http_post(url, headers, payload)
+    if not ok:
+        return {"ok": False, "error": "gemini_failed", "detail": res}
+    text = ""
+    if isinstance(res, dict):
+        text = res.get("candidates", [{}])[0].get("content") or res.get("output_text") or ""
+    elif isinstance(res, str):
+        text = res
+    return {"ok": True, "response": text, "raw": res}
+
+def _generate_local(prompt: str, max_tokens: int = 1024) -> Dict[str, Any]:
+    """
+    Generate text with a local transformers model if available.
+    Returns {"ok": True, "response": text} or {"ok": False, "error": msg}
+    """
+    if not TRANSFORMERS_AVAILABLE:
+        return {"ok": False, "error": "transformers_not_installed"}
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(LOCAL_LLM_MODEL)
+        model = AutoModelForCausalLM.from_pretrained(LOCAL_LLM_MODEL, device_map="auto")
+        # run generate (keep generation settings simple)
+        inputs = tokenizer(prompt, return_tensors="pt")
+        if torch and torch.cuda.is_available():
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+            model = model.to("cuda")
+        out = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False)
+        text = tokenizer.decode(out[0], skip_special_tokens=True)
         return {"ok": True, "response": text}
     except Exception as e:
-        return {"ok": False, "error": "failed-parsing-response: " + str(e), "raw": str(resp)}
+        return {"ok": False, "error": "local_model_failed", "detail": str(e)}
 
-# --- LOI generator (OpenAI + fallback) ---
+# -----------------------
+# Provider chain & public wrapper
+# -----------------------
+def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, providers: Optional[Tuple[str, ...]] = None) -> Dict[str, Any]:
+    """
+    Try providers in order until one returns a non-empty response.
+    Default chain is MODEL_PROVIDER_PRIMARY -> MODEL_PROVIDER_SECONDARY -> MODEL_PROVIDER_TERTIARY -> LOCAL -> DETERMINISTIC
+
+    Returns:
+      {"ok": True, "response": text, "provider": provider_name, "raw": raw}
+      or {"ok": False, "error": "...", "errors": [...]}
+    """
+    chain = list(providers) if providers else [MODEL_PROVIDER_PRIMARY, MODEL_PROVIDER_SECONDARY, MODEL_PROVIDER_TERTIARY]
+    errors = []
+    for provider in chain:
+        provider = (provider or "").upper()
+        try:
+            if provider == "DEEPSEEK":
+                res = _call_deepseek(prompt, max_tokens=max_tokens)
+            elif provider == "GROQ":
+                res = _call_groq(prompt, max_tokens=max_tokens)
+            elif provider in ("OPENAI", "GPT", "OPENAI_API"):
+                res = _call_openai_api(prompt, model="gpt-4o-mini", max_tokens=max_tokens)
+            elif provider == "GEMINI":
+                res = _call_gemini(prompt, max_tokens=max_tokens)
+            elif provider in ("LOCAL", "TRANSFORMERS"):
+                res = _generate_local(prompt, max_tokens=min(max_tokens, LOCAL_LLM_MAX_TOKENS))
+            elif provider == "STUB":
+                return {"ok": True, "response": "(stub) fallback response: provider set to STUB", "provider": "STUB"}
+            else:
+                # unknown provider -> skip
+                res = {"ok": False, "error": f"unsupported_provider_{provider}"}
+        except Exception as e:
+            res = {"ok": False, "error": "exception_in_provider_call", "detail": str(e), "tb": traceback.format_exc()}
+
+        if res.get("ok") and res.get("response"):
+            return {"ok": True, "response": res.get("response"), "provider": provider, "raw": res.get("raw")}
+        else:
+            errors.append({"provider": provider, "result": res})
+
+    # Try local model as a last attempt if not yet tried
+    try:
+        local = _generate_local(prompt, max_tokens=min(max_tokens, LOCAL_LLM_MAX_TOKENS))
+        if local.get("ok") and local.get("response"):
+            return {"ok": True, "response": local.get("response"), "provider": "LOCAL", "raw": local}
+        errors.append({"provider": "LOCAL", "result": local})
+    except Exception as e:
+        errors.append({"provider": "LOCAL", "error": str(e)})
+
+    # Final deterministic fallback (guaranteed)
+    try:
+        text = _deterministic_fallback_text(prompt)
+        return {"ok": True, "response": text, "provider": "DETERMINISTIC_FALLBACK", "errors": errors}
+    except Exception as e:
+        return {"ok": False, "error": "no_provider_succeeded", "errors": errors, "detail": str(e)}
+
+# -----------------------
+# deterministic fallback builder (used if all providers fail)
+# -----------------------
+def _deterministic_fallback_text(prompt: str, min_words: int = 200) -> str:
+    # Simple fallback: produce a structured LOI-like text based on the prompt
+    header = "LETTER OF INTENT — [AUTOGENERATED FALLBACK]\n\n"
+    body = "Executive Summary:\nThis is an autogenerated fallback LOI. The AI providers were not available.\n\n"
+    body += "Instruction given:\n" + (prompt[:2000] + ("\n\n" if len(prompt) > 2000 else "\n\n"))
+    body += "Offer & Structure:\n1) Cash Offer — subject to standard due diligence.\n2) Seller Financing — terms negotiable.\n3) Hybrid — investor refund at close.\n\n"
+    body += "Contingencies & Timeline:\nStandard inspections and title review. 10 business day period requested.\n\n"
+    body += "Signatures:\nBuyer: ______________________   Date: ___________\nSeller: ______________________  Date: ___________\n\n"
+    while len((header + body).split()) < min_words:
+        body += "Buyer aims for a timely, clean close and will work in good faith. "
+    return header + body
+
+# -----------------------
+# LOI generator (public)
+# -----------------------
 def generate_long_loi_text(prop: Dict[str, Any], min_words: int = 2000, max_words: int = 2500) -> str:
     """
-    Attempts to generate a long LOI using OpenAI if configured, otherwise falls back to deterministic
+    Generate a long LOI using the provider chain; will fall back to deterministic generator.
     """
     safe_prop = {k: v for k, v in prop.items() if k not in ("britton_score", "confidence", "internal_notes", "evidence_manifest")}
-    # Try to call OpenAI with the prompt if available
-    if OPENAI_AVAILABLE and OPENAI_KEY and LLM_PROMPT:
-        try:
-            # combine system prompt with user instruction
-            user_instruction = f"Create a professional Letter of Intent (LOI) between {min_words} and {max_words} words for the following property data: {json.dumps(safe_prop)}. DO NOT include internal scores (britton_score/confidence) nor any sensitive keys. Render the LOI clearly with sections: Executive Summary, Offer Terms, Financing Structure (three options), Contingencies, Timeline, Contact Info, and Signatures section."
-            # call helper
-            out = _get_openai_response(user_instruction, model="gpt-4o-mini", max_tokens=3800, temperature=0.0)
-            if out.get("ok"):
-                text = out.get("response", "")
-                # quick length check
-                if len(text.split()) < min_words:
-                    text += ("\n\n" + ("[Addendum] " + "Please see expanded terms. ") * ((min_words // 10) + 10))
-                return text
-        except Exception:
-            pass
+    prompt_instructions = (
+        (LLM_PROMPT + "\n\n") if LLM_PROMPT else ""
+    ) + (
+        f"You are an expert real estate acquisitions underwriter. Create a professional Letter of Intent (LOI) between {min_words} and {max_words} words for the following property data: {json.dumps(safe_prop)}. "
+        "Do NOT include internal scores (britton_score/confidence) nor secret keys. Render the LOI with sections: Executive Summary, Offer Terms (3 options), Financing Structure, Contingencies, Timeline, Contact Info, and Signatures. Use professional tone and clear section headings."
+    )
 
-    # Fallback deterministic generator (original behavior)
-    parts = []
-    parts.append(f"LETTER OF INTENT — {safe_prop.get('address', '[ADDRESS]')}\n")
-    parts.append("Executive Summary:\n")
-    parts.append(f"Buyer intends to acquire the property located at {safe_prop.get('address', '[ADDRESS]')}. The structure is intended to be creative and seller-friendly.\n\n")
-    parts.append("Offer & Structure:\n")
-    parts.append(f"Purchase Price: ${safe_prop.get('price', 'TBD')} | Preferred: Seller financing / carryback / hybrid.\n\n")
-    parts.append("Contingencies & Due Diligence:\n")
-    parts.append("Standard HOA, title, physical inspection & financing contingencies. 10 business day review.\n\n")
-    parts.append("Financing Options (Summary):\n")
-    parts.append("1) Cash Offer — subject to inspection.\n2) Seller Financing — negotiable term & amortization.\n3) Creative hybrid with investor send-back — refunding investor cash at close.\n\n")
-    parts.append("Timeline & Closing:\n")
-    parts.append("Buyer requests 10 business days for due diligence and a 30-60 day close window depending on financing.\n\n")
-    parts.append("Signatures:\n")
-    parts.append("Buyer: ______________________   Date: ___________\nSeller: ______________________  Date: ___________\n\n")
-    base_text = "\n".join(parts)
-    while len(base_text.split()) < min_words:
-        base_text += "\nBuyer aims for a timely, clean close and will work in good faith. " * 30
-    return base_text
+    # Use provider chain
+    out = provider_generate_text_with_fallback(prompt_instructions, max_tokens= min(4000, max_words * 2))
+    if out.get("ok") and out.get("response"):
+        text = out.get("response")
+        # ensure min length
+        if len(text.split()) < min_words:
+            addendum = "\n\n[Addendum]\n" + ("Please see expanded terms. " * ((min_words // 20) + 10))
+            text = text + addendum
+        return text
+
+    # final deterministic fallback
+    return _deterministic_fallback_text(prompt_instructions, min_words=min_words)
+
+# -----------------------
+# Module self-test helper (diagnostics)
+# -----------------------
+def diagnostics_report() -> Dict[str, Any]:
+    """
+    Lightweight diagnostics to summarize which integrations appear available.
+    """
+    report = {
+        "time": datetime.utcnow().isoformat() + "Z",
+        "components": {
+            "requests": bool(requests),
+            "boto3": bool(boto3),
+            "numpy": NUMPY_AVAILABLE,
+            "transformers": TRANSFORMERS_AVAILABLE,
+            "openai_legacy": OPENAI_LEGACY,
+            "openai_new": OPENAI_NEW
+        },
+        "env": {
+            "EVIDENCE_DIR": EVIDENCE_DIR,
+            "USE_S3": USE_S3,
+            "S3_BUCKET": S3_BUCKET,
+            "DEEPSEEK_KEY_present": bool(DEEPSEEK_KEY),
+            "GROQ_KEY_present": bool(GROQ_KEY),
+            "OPENAI_KEY_present": bool(OPENAI_KEY),
+            "GEMINI_KEY_present": bool(GEMINI_KEY)
+        }
+    }
+    return report
+
+# End of file
