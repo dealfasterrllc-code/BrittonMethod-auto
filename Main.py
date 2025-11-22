@@ -11,7 +11,7 @@ Features:
 - Persona stack assignment (pluggable)
 - Diagnostics endpoints
 - API key protection (BRITTON_API_KEY)
-- Natural-language endpoint /nlp that uses OPENAI_API_KEY when present
+- Natural-language endpoint /nlp that uses OPENAI_API_KEY when present (updated for openai>=1.0.0)
 - Graceful worker shutdown
 """
 
@@ -29,6 +29,12 @@ from typing import Dict, Any, Optional
 
 from flask import Flask, request, jsonify, abort
 from dotenv import load_dotenv
+
+# Optional: requests for external API wrappers (if installed)
+try:
+    import requests
+except Exception:
+    requests = None
 
 # --- Optional libs (SQLAlchemy, openai, numpy) ---
 SQLALCHEMY_AVAILABLE = False
@@ -199,9 +205,14 @@ load_dotenv()
 # --- Environment variables ---
 API_KEY = os.environ.get("BRITTON_API_KEY", "")     # required header/key for endpoints if present
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
-ATTOM_API_KEY = os.environ.get("ATTOM_API_KEY", "")
-TWILIO_SID = os.environ.get("TWILIO_SID", "")
-TWILIO_AUTH = os.environ.get("TWILIO_AUTH", "")
+ATTOM_API_KEY = os.environ.get("ATTOM_KEY", "")  # note: env variable name mapping
+TWILIO_SID = os.environ.get("TWILIO_API_SID", "")  # matches Render variables you listed
+TWILIO_AUTH = os.environ.get("TWILIO_API_SECRET", "")  # secret
+TWILIO_FROM = os.environ.get("TWILIO_FROM", "")  # optional from number
+GEMINI_KEY = os.environ.get("GEMINI_KEY", "")  # your earlier GEMINI_KEY var
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")  # tvly-dev...
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+EMAIL_SENDER = os.environ.get("EMAIL_SENDER", "")
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 EVIDENCE_DIR = os.environ.get("EVIDENCE_DIR", "/tmp/britton_evidence")
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///britton.db")
@@ -279,33 +290,25 @@ def get_payload() -> Dict[str, Any]:
     - JSON encoded as plain text
     - For GET, query params will be consulted by endpoints if needed
     """
-    # try proper JSON first (silent to avoid exceptions)
     p = request.get_json(silent=True)
     if p is None:
         raw = request.get_data(as_text=True) or ""
         raw = raw.strip()
         if raw == "":
             return {}
-        # try to parse raw as JSON
         try:
             parsed = json.loads(raw)
-            # if parsed is a string, wrap
             if isinstance(parsed, str):
                 return {"prompt": parsed}
             if isinstance(parsed, dict):
                 return parsed
-            # if parsed is a list or other, return as raw under a key
             return {"_raw": parsed}
         except Exception:
-            # treat raw text as prompt
             return {"prompt": raw}
-    # if p is a string (some clients), wrap as prompt
     if isinstance(p, str):
         return {"prompt": p}
-    # if p is dict-like, return as-is
     if isinstance(p, dict):
         return p
-    # fallback
     return {"_raw": str(p)}
 
 def enqueue_job(job_type: str, payload: Dict[str, Any], run_monte_carlo: bool = True, mc_runs: int = 2000) -> str:
@@ -429,7 +432,6 @@ def analyze_route():
     if API_KEY:
         require_api_key()
     payload = get_payload()
-    # support both {"property": {...}} and direct property object
     prop = payload.get("property") if isinstance(payload, dict) else None
     if not prop:
         prop = payload
@@ -459,7 +461,6 @@ def loi_route():
     prop = payload.get("property") if isinstance(payload, dict) else payload
     if not prop:
         return jsonify({"ok": False, "error": "missing property"}), 400
-    # sanitize/remove internal-only keys
     for k in ("britton_score", "confidence", "internal_notes", "evidence_manifest"):
         if isinstance(prop, dict):
             prop.pop(k, None)
@@ -479,7 +480,6 @@ def waterfall_route():
     if API_KEY:
         require_api_key()
     payload = get_payload()
-    # allow direct payload with price + existing_debt + investor_equity_pct
     price = payload.get("price")
     existing_debt = payload.get("existing_debt", 0)
     g = payload.get("investor_equity_pct", 0.25)
@@ -515,6 +515,77 @@ def persona_route():
         return jsonify({"ok": True, "stack": out})
     return jsonify({"ok": False, "error": "personas module not available"}), 500
 
+# --- External API helper wrappers (safe, optional) ---
+def attom_get_property_by_address(address: str) -> Dict[str, Any]:
+    """
+    Minimal Attom wrapper — only used if ATTOM_API_KEY present.
+    This is a minimal example; if you want expanded functionality, implement app_core.verify_listing_pipeline to use Attom properly.
+    """
+    if not ATTOM_API_KEY or not requests:
+        return {"ok": False, "error": "attom not available or requests missing"}
+    try:
+        # Example Attom endpoint - adjust to the plan you have (this is illustrative)
+        url = f"https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail"
+        # Attom expects query params like address or addressid depending on plan - placeholder:
+        params = {"address": address}
+        headers = {"Ocp-Apim-Subscription-Key": ATTOM_API_KEY}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        return {"ok": True, "status_code": r.status_code, "data": r.json() if r.content else None}
+    except Exception as e:
+        logger.exception("Attom call failed")
+        return {"ok": False, "error": str(e)}
+
+def twilio_send_sms(to: str, body: str) -> Dict[str, Any]:
+    """
+    Minimal Twilio SMS sender using REST API (if Twilio lib not installed).
+    Accepts TWILIO_SID and TWILIO_AUTH in env.
+    """
+    if not TWILIO_SID or not TWILIO_AUTH or not requests:
+        return {"ok": False, "error": "twilio config missing or requests not installed"}
+    try:
+        # prefer official twilio client if available
+        try:
+            from twilio.rest import Client
+            client = Client(TWILIO_SID, TWILIO_AUTH)
+            from_number = TWILIO_FROM or os.environ.get("TWILIO_FROM", "")
+            msg = client.messages.create(body=body, from_=from_number, to=to)
+            return {"ok": True, "sid": msg.sid}
+        except Exception:
+            # fallback raw REST
+            url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json"
+            data = {"From": TWILIO_FROM or os.environ.get("TWILIO_FROM", ""), "To": to, "Body": body}
+            r = requests.post(url, data=data, auth=(TWILIO_SID, TWILIO_AUTH), timeout=10)
+            return {"ok": True, "status_code": r.status_code, "resp": r.json() if r.content else None}
+    except Exception as e:
+        logger.exception("Twilio send failed")
+        return {"ok": False, "error": str(e)}
+
+def gemini_search_example(q: str) -> Dict[str, Any]:
+    """
+    Placeholder for Gemini usage. If you want to call a Google-style API or Gemini API,
+    implement this wrapper using the appropriate SDK and your GEMINI_KEY.
+    """
+    if not GEMINI_KEY:
+        return {"ok": False, "error": "gemini key missing"}
+    # We do not implement a network call here — leave as placeholder for your integration.
+    return {"ok": True, "info": "gemini wrapper placeholder", "query": q}
+
+def tavily_analyze_text(text: str) -> Dict[str, Any]:
+    """
+    Example Tavily (tvly) wrapper placeholder.
+    """
+    if not TAVILY_API_KEY or not requests:
+        return {"ok": False, "error": "tavily key missing or requests not installed"}
+    try:
+        # Example generic POST to Tavily (replace with real endpoint)
+        url = "https://api.tavily.ai/v1/analyze"
+        headers = {"Authorization": f"Bearer {TAVILY_API_KEY}", "Content-Type": "application/json"}
+        r = requests.post(url, json={"text": text}, headers=headers, timeout=10)
+        return {"ok": True, "status_code": r.status_code, "resp": r.json() if r.content else None}
+    except Exception as e:
+        logger.exception("Tavily call failed")
+        return {"ok": False, "error": str(e)}
+
 @app.route("/diagnostics/run", methods=["POST", "GET"])
 def diagnostics_run():
     if API_KEY:
@@ -536,8 +607,12 @@ def diagnostics_run():
         results["checks"].append({"name": "personas", "ok": True, "count": len(BRITTON_PERSONAS)})
     else:
         results["checks"].append({"name": "personas", "ok": False})
-    results["checks"].append({"name": "openai_available", "ok": OPENAI_AVAILABLE})
+    results["checks"].append({"name": "openai_available", "ok": OPENAI_AVAILABLE and bool(OPENAI_KEY)})
     results["checks"].append({"name": "numpy_available", "ok": NUMPY_AVAILABLE})
+    results["checks"].append({"name": "attom_available", "ok": bool(ATTOM_API_KEY)})
+    results["checks"].append({"name": "twilio_available", "ok": bool(TWILIO_SID and TWILIO_AUTH)})
+    results["checks"].append({"name": "gemini_available", "ok": bool(GEMINI_KEY)})
+    results["checks"].append({"name": "tavily_available", "ok": bool(TAVILY_API_KEY)})
     results["jobs_total"] = len(JOB_STORE)
     return jsonify(results), 200
 
@@ -549,6 +624,8 @@ def diagnostics_env():
         "OPENAI_API_KEY": mask_key(OPENAI_KEY),
         "BRITTON_API_KEY": mask_key(API_KEY),
         "ATTOM_API_KEY": mask_key(ATTOM_API_KEY),
+        "GEMINI_KEY": mask_key(GEMINI_KEY),
+        "TAVILY_API_KEY": mask_key(TAVILY_API_KEY),
         "REDIS_URL": mask_key(REDIS_URL),
         "DATABASE_URL": mask_key(DATABASE_URL),
         "USE_S3": os.environ.get("USE_S3", "false"),
@@ -572,6 +649,132 @@ def shutdown():
     JOB_QUEUE.put(None)
     return jsonify({"ok": True, "message": "shutdown queued"}), 200
 
+# --- OpenAI helper: robust for openai>=1.0.0 and graceful fallback ---
+def get_openai_response(prompt: str, model: str, max_tokens: int = 512, temperature: float = 0.0) -> Dict[str, Any]:
+    """
+    Returns dict {"ok": True, "response": text} or {"ok": False, "error": ...}
+    This handles both modern openai.chat.completions.create interface and
+    older ChatCompletion.create if available. It is defensive.
+    """
+    if not OPENAI_AVAILABLE or not OPENAI_KEY:
+        return {"ok": False, "error": "openai not available or OPENAI_API_KEY missing"}
+
+    try:
+        # configure API key
+        try:
+            # new style
+            openai.api_key = OPENAI_KEY
+        except Exception:
+            # fallback - library might set differently; keep best effort
+            pass
+
+        # New v1.0+ API surface: openai.chat.completions.create(...)
+        # But different library versions expose different attributes; handle a few variants:
+        resp = None
+        # Prefer the modern explicit path if present
+        if hasattr(openai, "chat") and hasattr(openai.chat, "completions"):
+            try:
+                resp = openai.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            except Exception as e:
+                logger.debug("openai.chat.completions.create failed: %s", e)
+                resp = None
+
+        # Some installs still provide ChatCompletion.create — keep as backup
+        if resp is None and hasattr(openai, "ChatCompletion") and hasattr(openai.ChatCompletion, "create"):
+            try:
+                resp = openai.ChatCompletion.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            except Exception as e:
+                logger.debug("openai.ChatCompletion.create failed: %s", e)
+                resp = None
+
+        # If resp is still None, try legacy Completion API as last resort (but it's deprecated)
+        if resp is None and hasattr(openai, "Completion") and hasattr(openai.Completion, "create"):
+            try:
+                # Legacy: feed prompt straight (less ideal for chat models)
+                resp = openai.Completion.create(
+                    engine=model,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            except Exception as e:
+                logger.debug("openai.Completion.create failed: %s", e)
+                resp = None
+
+        if resp is None:
+            return {"ok": False, "error": "OpenAI call failed: no available client method (check openai lib version)"}
+
+        # Try to extract text safely from common response shapes
+        try:
+            # If object has .choices (OpenAI SDK returns objects with attributes)
+            choices = None
+            if hasattr(resp, "choices"):
+                # SDK objects might support indexing -> convert to python objects where possible
+                try:
+                    choices = resp.choices
+                except Exception:
+                    try:
+                        choices = resp.get("choices")
+                    except Exception:
+                        choices = None
+            else:
+                # If resp is a dict-like
+                try:
+                    choices = resp.get("choices")
+                except Exception:
+                    choices = None
+
+            text = ""
+            if choices:
+                first = choices[0]
+                # first may be an object with .message or .text attributes or dict
+                if isinstance(first, dict):
+                    # chat completion style
+                    msg = first.get("message") or first.get("delta") or {}
+                    if isinstance(msg, dict):
+                        text = msg.get("content") or msg.get("text") or ""
+                    if not text:
+                        text = first.get("text") or ""
+                else:
+                    # object with attributes
+                    try:
+                        msg = getattr(first, "message", None)
+                        if msg and hasattr(msg, "get"):
+                            text = msg.get("content") or ""
+                        elif msg and hasattr(msg, "content"):
+                            text = msg.content
+                        else:
+                            text = getattr(first, "text", "") or ""
+                    except Exception:
+                        text = str(first)
+            else:
+                # fallback to stringifying the response
+                text = str(resp)
+
+            # final normalization
+            if isinstance(text, bytes):
+                text = text.decode("utf-8", errors="replace")
+            if not text:
+                text = str(resp)
+            return {"ok": True, "response": text}
+        except Exception as e:
+            logger.exception("Failed parsing OpenAI response")
+            return {"ok": False, "error": f"failed-parsing-response: {e}", "raw": str(resp)}
+
+    except Exception as e:
+        logger.exception("OpenAI call failed")
+        return {"ok": False, "error": str(e)}
+
 # --- Natural-language (Chat-like) endpoint ---
 @app.route("/nlp", methods=["POST", "GET"])
 def nlp_route():
@@ -587,72 +790,32 @@ def nlp_route():
     if API_KEY:
         require_api_key()
 
-    payload = get_payload()  # robust parse (json, raw, json-as-text)
-    # If GET and payload empty, allow prompt from query param
+    payload = get_payload()
     if request.method == "GET" and not payload:
         prompt = request.args.get("prompt") or request.args.get("q") or ""
         payload = {"prompt": prompt} if prompt else {}
-    # ensure payload is dict
     if not isinstance(payload, dict):
         payload = {"_raw": str(payload)}
 
     prompt = (payload.get("prompt") or payload.get("query") or "") if isinstance(payload, dict) else ""
-    # allow clients that send bare string body as the payload directly earlier; get_payload covers that
     if not prompt:
         return jsonify({"ok": False, "error": "missing prompt"}), 400
 
+    # default model selection
     model = payload.get("model", "gpt-4o-mini" if OPENAI_AVAILABLE else "fallback")
     max_tokens = int(payload.get("max_tokens", 512)) if payload.get("max_tokens") is not None else 512
     temperature = float(payload.get("temperature", 0.0)) if payload.get("temperature") is not None else 0.0
 
     logger.info("NLP request model=%s prompt_len=%d", model, len(prompt))
 
-    # If OpenAI available & key present -> call OpenAI
+    # If OpenAI available & key present -> call OpenAI using robust helper
     if OPENAI_KEY and OPENAI_AVAILABLE:
-        try:
-            openai.api_key = OPENAI_KEY
-            try:
-                # prefer chat completion
-                resp = openai.ChatCompletion.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                )
-                text = ""
-                if isinstance(resp, dict):
-                    choices = resp.get("choices") or []
-                    if choices:
-                        # ChatCompletion structure check
-                        first = choices[0]
-                        if isinstance(first, dict):
-                            msg = first.get("message")
-                            if isinstance(msg, dict):
-                                text = msg.get("content") or ""
-                            else:
-                                text = first.get("text") or ""
-                if not text:
-                    text = str(resp)
-                return jsonify({"ok": True, "model": model, "response": text}), 200
-            except Exception:
-                # fallback to completions API
-                resp = openai.Completion.create(
-                    engine=model,
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                )
-                text = ""
-                if isinstance(resp, dict):
-                    choices = resp.get("choices") or []
-                    if choices:
-                        text = choices[0].get("text") or ""
-                if not text:
-                    text = str(resp)
-                return jsonify({"ok": True, "model": model, "response": text}), 200
-        except Exception as e:
-            logger.exception("OpenAI call failed")
-            return jsonify({"ok": False, "error": f"OpenAI call failed: {str(e)}"}), 500
+        out = get_openai_response(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
+        if out.get("ok"):
+            return jsonify({"ok": True, "model": model, "response": out.get("response")}), 200
+        else:
+            logger.error("OpenAI helper returned error: %s", out.get("error"))
+            return jsonify({"ok": False, "error": f"OpenAI call failed: {out.get('error')}", "details": out.get("raw")}), 500
 
     # Fallback local assistant (deterministic)
     try:
