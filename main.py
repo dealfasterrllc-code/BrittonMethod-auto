@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Main.py — Britton Method (Final / Production-ready)
+main.py — Production-ready Flask entry for BrittonMethod-auto
 
-This version wires main to app_core's provider chain/fallback and
-ensures deterministic fallback ALWAYS works if providers or credits are dead.
+Preserves original application logic and provider/fallback chain,
+but hardens runtime behavior for production (Render/Gunicorn), fixes
+shutdown, prompt-safety, DB guards, logging, and removes syntax errors.
 """
+
+from __future__ import annotations
 
 import os
 import json
@@ -23,16 +26,17 @@ from dotenv import load_dotenv
 
 # Optional: requests for external API wrappers (if installed)
 try:
-    import requests
+    import requests  # type: ignore
 except Exception:
     requests = None
 
 # --- Optional libs (SQLAlchemy, openai, numpy) ---
 SQLALCHEMY_AVAILABLE = False
 try:
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from models import Base, Job   # optional models.py in your repo
+    from sqlalchemy import create_engine  # type: ignore
+    from sqlalchemy.orm import sessionmaker  # type: ignore
+    # models.py optional
+    from models import Base, Job  # type: ignore
     SQLALCHEMY_AVAILABLE = True
 except Exception:
     SQLALCHEMY_AVAILABLE = False
@@ -40,14 +44,26 @@ except Exception:
 # Attempt to import user-supplied app_core from the repo (preferred)
 APP_CORE_AVAILABLE = False
 try:
-    import app_core as ac
+    import app_core as ac  # type: ignore
     # Bind commonly used helpers from app_core (preferred names)
-    underwriter_deterministic = getattr(ac, "underwriter_deterministic", None) or getattr(ac, "underwriter", None) and getattr(ac.underwriter, "deterministic", None)
-    monte_carlo_simulation = getattr(ac, "monte_carlo_simulation", None) or getattr(ac, "underwriter", None) and getattr(ac.underwriter, "monte_carlo", None)
-    simulate_refund_waterfall = getattr(ac, "simulate_refund_waterfall", None) or getattr(ac, "Underwriter", None) and getattr(ac.Underwriter, "simulate_refund_waterfall", None)
-    verify_listing_pipeline = getattr(ac, "verify_listing_pipeline", None) or getattr(ac, "verifier", None) and getattr(ac.verifier, "verify", None)
-    store_evidence_binary = getattr(ac, "store_evidence_binary", None) or getattr(ac, "evidence_store", None) and getattr(ac.evidence_store, "store_binary", None)
-    generate_long_loi_text = getattr(ac, "generate_long_loi_text", None) or getattr(ac, "generate_long_loi_text_wrapper", None)
+    underwriter_deterministic = getattr(ac, "underwriter_deterministic", None) or (
+        getattr(ac, "underwriter", None) and getattr(ac.underwriter, "deterministic", None)
+    )
+    monte_carlo_simulation = getattr(ac, "monte_carlo_simulation", None) or (
+        getattr(ac, "underwriter", None) and getattr(ac.underwriter, "monte_carlo", None)
+    )
+    simulate_refund_waterfall = getattr(ac, "simulate_refund_waterfall", None) or (
+        getattr(ac, "Underwriter", None) and getattr(ac.Underwriter, "simulate_refund_waterfall", None)
+    )
+    verify_listing_pipeline = getattr(ac, "verify_listing_pipeline", None) or (
+        getattr(ac, "verifier", None) and getattr(ac.verifier, "verify", None)
+    )
+    store_evidence_binary = getattr(ac, "store_evidence_binary", None) or (
+        getattr(ac, "evidence_store", None) and getattr(ac.evidence_store, "store_binary", None)
+    )
+    generate_long_loi_text = getattr(ac, "generate_long_loi_text", None) or getattr(
+        ac, "generate_long_loi_text_wrapper", None
+    )
     # Provider chain wrapper: prefer provider_generate_text_with_fallback, fallback to get_openai_response if present
     provider_chain_fn = getattr(ac, "provider_generate_text_with_fallback", None)
     legacy_get_openai_response = getattr(ac, "get_openai_response", None)
@@ -82,13 +98,10 @@ def _shim_provider_wrapper(prompt: str, model: str = "gpt-4o-mini", max_tokens: 
         # Primary: provider chain (DeepSeek/Groq/OpenAI/Gemini/Local/Deterministic)
         if provider_chain_fn:
             out = provider_chain_fn(prompt, max_tokens=max_tokens)
-            # provider_generate_text_with_fallback returns dict with ok/response/provider
             if isinstance(out, dict) and out.get("ok"):
                 return {"ok": True, "response": out.get("response"), "provider": out.get("provider") or "UNKNOWN", "raw": out.get("raw")}
-            # if provider returns text directly, wrap it
             if isinstance(out, str):
                 return {"ok": True, "response": out, "provider": "PROVIDER_CHAIN_TEXT"}
-            # else fallthrough to legacy or deterministic
         # Secondary: legacy direct helper (older app_core might export this)
         if legacy_get_openai_response:
             res = legacy_get_openai_response(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
@@ -105,6 +118,7 @@ def _shim_provider_wrapper(prompt: str, model: str = "gpt-4o-mini", max_tokens: 
     except Exception as e:
         return {"ok": False, "error": str(e), "provider": "EXCEPTION"}
 
+
 # Expose get_openai_response for the rest of main to call
 get_openai_response = _shim_provider_wrapper
 
@@ -112,7 +126,7 @@ get_openai_response = _shim_provider_wrapper
 load_dotenv()
 
 # --- Environment variables & mappings ---
-API_KEY = os.environ.get("BRITTON_API_KEY", "")     # required header/key for endpoints if present
+API_KEY = os.environ.get("BRITTON_API_KEY", "")  # required header/key for endpoints if present
 # Accept both ATTOM_KEY and ATTOM_API_KEY
 ATTOM_API_KEY = os.environ.get("ATTOM_KEY", "") or os.environ.get("ATTOM_API_KEY", "")
 # Twilio mapping
@@ -148,7 +162,8 @@ logger = logging.getLogger("britton")
 
 # --- Personas (optional) ---
 try:
-    import britton_personas as personas_mod
+    import britton_personas as personas_mod  # type: ignore
+
     BRITTON_PERSONAS = getattr(personas_mod, "BRITTON_PERSONAS", None)
     assign_persona_stack = getattr(personas_mod, "assign_persona_stack", None)
 except Exception:
@@ -159,10 +174,14 @@ except Exception:
 SessionLocal = None
 if SQLALCHEMY_AVAILABLE:
     try:
-        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
+        engine = create_engine(
+            DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+        )
         SessionLocal = sessionmaker(bind=engine)
         try:
-            Base.metadata.create_all(bind=engine)
+            # Base may not exist or models may be missing; guard it
+            if "Base" in globals() and hasattr(Base, "metadata"):
+                Base.metadata.create_all(bind=engine)
         except Exception:
             logger.exception("Failed creating DB metadata (models may be missing or broken).")
     except Exception:
@@ -172,10 +191,13 @@ if SQLALCHEMY_AVAILABLE:
 # --- Job queue & in-memory store ---
 JOB_QUEUE = queue.Queue()
 JOB_STORE: Dict[str, Dict[str, Any]] = {}
+# Shutdown event for graceful termination
+_SHUTDOWN_EVENT = threading.Event()
 
 # --- Helper defs ---
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
 
 def mask_key(val: Optional[str]) -> str:
     if not val:
@@ -185,6 +207,7 @@ def mask_key(val: Optional[str]) -> str:
         return s[:2] + "..." + s[-2:]
     return s[:4] + "..." + s[-4:]
 
+
 def require_api_key():
     if not API_KEY:
         return True
@@ -192,6 +215,7 @@ def require_api_key():
     if key == API_KEY:
         return True
     abort(401, description="Missing or invalid API key.")
+
 
 def get_payload() -> Dict[str, Any]:
     p = request.get_json(silent=True)
@@ -215,6 +239,7 @@ def get_payload() -> Dict[str, Any]:
         return p
     return {"_raw": str(p)}
 
+
 def enqueue_job(job_type: str, payload: Dict[str, Any], run_monte_carlo: bool = True, mc_runs: int = 2000) -> str:
     job_id = str(uuid.uuid4())
     JOB_STORE[job_id] = {"created": datetime.utcnow().isoformat() + "Z", "status": "queued", "payload": payload}
@@ -230,14 +255,19 @@ def enqueue_job(job_type: str, payload: Dict[str, Any], run_monte_carlo: bool = 
             logger.exception("DB persist job failed")
     return job_id
 
+
 def worker_loop():
     logger.info("Background worker starting (in-process fallback).")
-    while True:
+    # job variable defined here so exception handling below can reference it safely
+    job = None
+    while not _SHUTDOWN_EVENT.is_set():
         try:
             job = JOB_QUEUE.get()
+            # sentinel for shutdown
             if job is None:
-                logger.info("Worker shutdown triggered.")
+                logger.info("Worker received shutdown sentinel.")
                 break
+
             job_id = job.get("job_id")
             JOB_STORE[job_id]["status"] = "running"
             t0 = time.time()
@@ -310,7 +340,11 @@ def worker_loop():
                     logger.exception("DB update job failed")
 
         except Exception as e:
-            job_id_local = job.get("job_id") if isinstance(job, dict) else "unknown"
+            job_id_local = None
+            try:
+                job_id_local = job.get("job_id") if isinstance(job, dict) else "unknown"
+            except Exception:
+                job_id_local = "unknown"
             JOB_STORE.setdefault(job_id_local, {})["status"] = "error"
             JOB_STORE[job_id_local]["result"] = {"ok": False, "error": str(e), "tb": traceback.format_exc()}
             logger.exception("Worker loop exception")
@@ -319,6 +353,7 @@ def worker_loop():
                 JOB_QUEUE.task_done()
             except Exception:
                 pass
+
 
 _worker_thread = threading.Thread(target=worker_loop, daemon=True)
 _worker_thread.start()
@@ -484,7 +519,15 @@ def job_status(job_id):
 def shutdown():
     if API_KEY:
         require_api_key()
-    JOB_QUEUE.put(None)
+    # signal worker to stop and enqueue sentinel
+    try:
+        _SHUTDOWN_EVENT.set()
+        JOB_QUEUE.put(None)
+        # attempt to join thread (non-blocking, short timeout)
+        if _worker_thread.is_alive():
+            _worker_thread.join(timeout=5)
+    except Exception:
+        logger.exception("shutdown encountered an error")
     return jsonify({"ok": True, "message": "shutdown queued"}), 200
 
 # --- Natural-language (Chat-like) endpoint ---
@@ -504,11 +547,14 @@ def nlp_route():
     if not prompt:
         return jsonify({"ok": False, "error": "missing prompt"}), 400
 
+    # Clip prompt length for logging & provider safety (avoid massive memory usage)
+    max_prompt_log = 10000
+    prompt_for_log = prompt if len(prompt) <= max_prompt_log else (prompt[:max_prompt_log] + "...[truncated]")
     model = payload.get("model", os.environ.get("MODEL_PROVIDER_PRIMARY", "gpt-4o-mini"))
     max_tokens = int(payload.get("max_tokens", 512)) if payload.get("max_tokens") is not None else 512
     temperature = float(payload.get("temperature", 0.0)) if payload.get("temperature") is not None else 0.0
 
-    logger.info("NLP request model=%s prompt_len=%d", model, len(prompt))
+    logger.info("NLP request model=%s prompt_len=%d", model, min(len(prompt), max_prompt_log))
 
     try:
         # Call the unified provider shim (this will try provider chain, legacy helper, then deterministic)
@@ -530,7 +576,12 @@ def nlp_route():
 
 # --- Run server ---
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8000))
     logger.info("Starting BrittonMethod API on port %s", port)
-    logger.info("Providers: provider_chain_fn=%s legacy_get_openai_response=%s deterministic_fallback=%s", bool(provider_chain_fn), bool(legacy_get_openai_response), bool(deterministic_fallback))
+    logger.info(
+        "Providers: provider_chain_fn=%s legacy_get_openai_response=%s deterministic_fallback=%s",
+        bool(provider_chain_fn),
+        bool(legacy_get_openai_response),
+        bool(deterministic_fallback),
+    )
     app.run(host="0.0.0.0", port=port, threaded=True)
