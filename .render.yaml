@@ -1,7 +1,7 @@
 # ---------- .render.yaml ----------
 # BrittonMethod API - Production-ready Render configuration
 # Author: DealFasterr / BrittonMethod
-# Description: Web service using Docker, Gunicorn, background worker queue, and evidence persistence
+# Description: Web service using Docker, entrypoint, Gunicorn, background worker queue, and evidence persistence
 
 services:
   - type: web
@@ -40,9 +40,18 @@ services:
         value: "10"
       - key: EVIDENCE_DIR
         value: "/tmp/britton_evidence"
-    # Optional build environment variables
+      - key: MODEL_PROVIDER_PRIMARY
+        value: "DEEPSEEK"
+      - key: MODEL_PROVIDER_SECONDARY
+        value: "GROQ"
+      - key: MODEL_PROVIDER_TERTIARY
+        value: "OPENAI"
+      - key: AUTONOMOUS_MODE
+        value: "false"
+    # Optional build environment variables / hooks
     buildCommand: "echo 'Building BrittonMethod Docker image...'"
-    startCommand: "gunicorn main:app --bind 0.0.0.0:$PORT --workers 3 --threads 4 --timeout 120 --log-level info"
+    # Use entrypoint.sh so the container can perform init tasks before launching Gunicorn
+    startCommand: "./entrypoint.sh"
     healthCheckPath: "/health"
     healthCheckInterval: 30
     healthCheckTimeout: 5
@@ -54,7 +63,7 @@ services:
     # Auto-deploy from GitHub / GitLab repository
     autoDeploy: true
     branch: main
-    # Optional secrets management
+    # Optional secrets management (Render will link these to the service)
     secrets:
       - BRITTON_API_KEY
       - OPENAI_API_KEY
@@ -99,7 +108,16 @@ services:
         value: "10"
       - key: EVIDENCE_DIR
         value: "/tmp/britton_evidence"
-    startCommand: "python main.py" # Runs the in-process worker thread
+      - key: MODEL_PROVIDER_PRIMARY
+        value: "DEEPSEEK"
+      - key: MODEL_PROVIDER_SECONDARY
+        value: "GROQ"
+      - key: MODEL_PROVIDER_TERTIARY
+        value: "OPENAI"
+      - key: AUTONOMOUS_MODE
+        value: "false"
+    # Worker start command runs the in-process worker thread inside main.py
+    startCommand: "python main.py"
     disk:
       mountPath: /tmp/britton_evidence
       sizeGB: 1
