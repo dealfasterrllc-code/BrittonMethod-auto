@@ -7,37 +7,45 @@ numpy>=1.23
 
 # === Web / app servers & UX ===
 Flask>=2.2
-gunicorn>=20.1          # production WSGI for Flask
-uvicorn>=0.22.0         # ASGI server if needed
-streamlit>=1.20         # optional dashboard / admin UI
+gunicorn>=20.1
+uvicorn>=0.22.0
+streamlit>=1.20
 
 # === DB, ORM, migrations ===
 SQLAlchemy>=1.4
 sqlalchemy-utils>=0.41.0
-psycopg2-binary>=2.9.6  # Postgres driver
-alembic>=1.11           # migrations
+psycopg2-binary>=2.9.6
+alembic>=1.11
 
 # === Queues & background jobs ===
 redis>=4.5.5
-rq>=1.1.0               # simple queue (or replace with celery)
-celery[redis]>=5.3.2    # optional advanced task queue
+rq>=1.1.0
+celery[redis]>=5.3.2
 
 # === ML / modeling / stats ===
 scikit-learn>=1.2
 xgboost>=1.7
 joblib>=1.3
 matplotlib>=3.6
-numpy>=1.23              # ensure compatibility
 
-# === OpenAI / LLM / APIs ===
+# === OpenAI / LLM / APIs / embeddings ===
 openai>=0.27
-tavily-python>=0.3.5     # optional real-time search SDK
+tavily-python>=0.3.5
 twilio>=8.0
+sentence-transformers>=2.2.2
+pinecone-client>=2.2.1
+
+# === Transformers & local inference (optional / heavy) ===
+# NOTE: transformers and torch are heavy. Only install if you intend to run local LLM inference.
+transformers>=4.35
+# If you need torch for local inference, install an appropriate build for your environment (cpu or cuda).
+# Example (CPU): pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Recommended: install torch separately per your environment; not pinned here.
 
 # === AWS / storage / S3 ===
 boto3>=1.26
-s3fs==2023.12.1           # pinned stable version
-fsspec==2023.12.1         # pinned to match s3fs
+s3fs==2023.12.1
+fsspec==2023.12.1
 
 # === Documents & reporting ===
 python-docx>=0.8.11
@@ -52,12 +60,12 @@ httpx>=0.24
 aiohttp>=3.8
 
 # === Scraping / headless browsers ===
-playwright>=1.33.0        # requires `python -m playwright install chromium` post-install
+playwright>=1.33.0        # requires `python -m playwright install chromium` after install
 selenium>=4.10.0
 undetected-chromedriver>=3.4.0
 
 # === Search / indexing / analytics ===
-elasticsearch>=8.8.0      # or opensearch-py if using OpenSearch
+elasticsearch>=8.8.0
 prometheus-client>=0.16.0
 opentelemetry-api>=1.14.0
 opentelemetry-sdk>=1.14.0
@@ -66,7 +74,7 @@ opentelemetry-sdk>=1.14.0
 geopy>=2.3.0
 usaddress>=0.5.10
 shapely>=2.0.1
-geoalchemy2>=0.11.3       # if using PostGIS
+geoalchemy2>=0.11.3
 
 # === Validation / data modeling ===
 pydantic>=1.10
@@ -76,7 +84,7 @@ python-magic>=0.4.27
 
 # === Security / encryption / auth ===
 cryptography>=41.0
-python-jose>=3.3.0        # JWT handling
+python-jose>=3.3.0
 
 # === Monitoring / error tracking ===
 sentry-sdk>=1.28.0
@@ -94,14 +102,16 @@ flake8>=6.0
 black>=24.3
 isort>=6.0
 
-# === Optional heavy ML (only if needed locally) ===
-# torch>=2.2.0+cpu        # uncomment if you need torch for local inference (large download)
+# === Optional heavy ML (manual install recommended) ===
+# If you want local model inference with torch, install torch separately (select CUDA/cpu wheel).
+# Example (CPU): pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Uncomment to include in automated installs (may increase image size substantially):
+# torch>=2.2.0
 
 # === Optional convenience / integrations ===
 python-multipart>=0.0.6
 
-# === Notes ===
-# - Playwright requires browser binaries; run: `python -m playwright install chromium` after installing.
-# - If building a small production image, remove optional heavy libs (selenium, xgboost, torch, streamlit, playwright).
-# - Pinned s3fs/fsspec versions prevent Render deploy failures with Python 3.11.
-# - Added duplicate numpy check removed conflicts
+# === Notes / recommendations ===
+# - Playwright needs browser binaries: run `python -m playwright install chromium` after install.
+# - If building a smaller production container, remove optional heavy libs (transformers, torch, selenium, xgboost, streamlit, playwright).
+# - For vector DB memory, pinecone-client is included; if you use pgvector instead, add the appropriate DB driver and client packages.
