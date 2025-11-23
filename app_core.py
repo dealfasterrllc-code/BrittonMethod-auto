@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """
-app_core.py — helper implementations for Britton Method (production-ready)
+app_core.py — final production-ready core for Britton Method
+
+Compatibility:
+- Designed to work with the project's requirements (requests, numpy, openai, transformers optional, twilio optional, pinecone optional, sentence-transformers optional).
+- All external connectors are optional and guarded; missing packages or missing keys won't crash the process.
+- Deterministic fallback ALWAYS works — guaranteed free operation.
 
 Features:
-- Evidence storage (disk + optional S3)
-- Underwriter deterministic math & Britton Score
-- Monte Carlo simulation (numpy optional)
+- Evidence store (disk + optional S3)
+- Deterministic underwriter & Britton score
+- Monte Carlo (numpy optional)
 - Refund waterfall simulation
-- Listing verification pipeline (stubs with evidence capture)
-- Robust multi-provider LLM wrapper with retries & fallback
-    DeepSeek -> GROQ -> OpenAI (new client or legacy) -> Gemini -> local transformers -> deterministic fallback
-- LOI generator using the provider chain + deterministic fallback
-- diagnostics_report() for quick checks
-- Optional connectors: Meta (Facebook Graph), Twilio SMS (guarded)
-- Memory store (pinecone/sentence-transformers/local JSONL fallback)
-- AUTONOMOUS_MODE guard for live actions
+- Listing verification pipeline (stubs capturing evidence)
+- LLM provider chain with retries: DeepSeek -> GROQ -> OpenAI (new + legacy) -> Gemini -> Local transformers -> Deterministic fallback
+- LOI generator (provider chain + deterministic fallback)
+- Meta (Facebook) posting helper (guarded)
+- Twilio SMS helper (guarded)
+- Memory store: Pinecone (optional) / sentence-transformers (optional) / local JSONL fallback
+- Diagnostics
 """
+
+from __future__ import annotations
 
 import os
 import json
@@ -31,20 +37,26 @@ from typing import Dict, Any, Optional, Tuple, List
 # Logging
 logger = logging.getLogger("app_core")
 if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    h = logging.StreamHandler()
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    h.setFormatter(fmt)
+    logger.addHandler(h)
 logger.setLevel(os.environ.get("APP_CORE_LOG_LEVEL", "INFO"))
 
 # -----------------------
 # Optional libraries (guarded imports)
 # -----------------------
+# httpx as alternative to requests (requirements include httpx)
+try:
+    import httpx
+except Exception:
+    httpx = None
+
 try:
     import requests
 except Exception:
     requests = None
-    logger.debug("requests not available")
+    logger.debug("requests not available; httpx may be used")
 
 try:
     import boto3
@@ -60,7 +72,7 @@ except Exception:
     NUMPY_AVAILABLE = False
     logger.debug("numpy not available")
 
-# OpenAI: support both legacy openai package and new OpenAI client if available
+# OpenAI: legacy and new client
 try:
     import openai as _legacy_openai
     OPENAI_LEGACY = True
@@ -77,7 +89,7 @@ except Exception:
     OpenAIClient = None
     OPENAI_NEW = False
 
-# Transformers local model (optional)
+# Transformers local model
 try:
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import torch
@@ -90,7 +102,7 @@ except Exception:
     TRANSFORMERS_AVAILABLE = False
     logger.debug("transformers not available")
 
-# Sentence-transformers fallback for embeddings & semantic search
+# sentence-transformers for embeddings
 try:
     from sentence_transformers import SentenceTransformer
     SENTE_AVAILABLE = True
@@ -100,27 +112,27 @@ except Exception:
     SENTE_AVAILABLE = False
     logger.debug("sentence-transformers not available")
 
-# Pinecone optional
+# pinecone optional
 try:
     import pinecone
     PINECONE_AVAILABLE = True
-    logger.debug("pinecone available")
+    logger.debug("pinecone SDK available")
 except Exception:
     pinecone = None
     PINECONE_AVAILABLE = False
     logger.debug("pinecone not available")
 
-# Twilio optional
+# twilio optional
 try:
     from twilio.rest import Client as TwilioClient
     TWILIO_SDK_AVAILABLE = True
-    logger.debug("twilio available")
+    logger.debug("twilio SDK available")
 except Exception:
     TwilioClient = None
     TWILIO_SDK_AVAILABLE = False
-    logger.debug("twilio not available")
+    logger.debug("twilio SDK not available")
 
-# Sentry optional
+# sentry optional
 try:
     import sentry_sdk
     SENTRY_AVAILABLE = True
@@ -129,7 +141,7 @@ except Exception:
     SENTRY_AVAILABLE = False
 
 # -----------------------
-# Env / defaults
+# Environment / defaults
 # -----------------------
 EVIDENCE_DIR = os.environ.get("EVIDENCE_DIR", "/tmp/britton_evidence")
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
@@ -157,25 +169,26 @@ MODEL_PROVIDER_TERTIARY = os.environ.get("MODEL_PROVIDER_TERTIARY", "OPENAI").up
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "mosaicml/mpt-7b-instruct")
 LOCAL_LLM_MAX_TOKENS = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "2048"))
 
-# Other keys
+# Other keys mapping
 ATTOM_API_KEY = os.environ.get("ATTOM_KEY", "") or os.environ.get("ATTOM_API_KEY", "")
-TWILIO_SID = os.environ.get("TWILIO_API_SID", "") or os.environ.get("TWILIO_SID", "")
-TWILIO_AUTH = os.environ.get("TWILIO_API_SECRET", "") or os.environ.get("TWILIO_AUTH", "")
+TWILIO_API_SID = os.environ.get("TWILIO_API_SID", "") or os.environ.get("TWILIO_SID", "")
+TWILIO_API_SECRET = os.environ.get("TWILIO_API_SECRET", "") or os.environ.get("TWILIO_AUTH", "")
 TWILIO_FROM = os.environ.get("TWILIO_FROM", "")
+
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN", "") or os.environ.get("META_ACCESS_TOKEN", "")
 FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID", "")
 FACEBOOK_GRAPH_URL = os.environ.get("FACEBOOK_GRAPH_URL", "https://graph.facebook.com/v17.0")
 
-# Memory (vector DB) config
+# Memory config
 VECTOR_DB = os.environ.get("VECTOR_DB", "")  # e.g., PINECONE, PGVECTOR, LOCAL
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "")
 PINECONE_ENV = os.environ.get("PINECONE_ENV", "")
+PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX", "britton-memory")
 
-# Safety / autonomy
+# Autonomy guard
 AUTONOMOUS_MODE = os.environ.get("AUTONOMOUS_MODE", "false").lower() in ("1", "true", "yes")
-HUMAN_APPROVAL_LIST = os.environ.get("HUMAN_APPROVAL_EMAILS", "")  # not used automatically, UI integration
 
-# Prompt loader (optional)
+# Prompt loader
 PROMPT_PATH = os.path.join("prompts", "britton_underwriter_master.py")
 LLM_PROMPT = None
 if os.path.exists(PROMPT_PATH):
@@ -189,7 +202,7 @@ if os.path.exists(PROMPT_PATH):
     except Exception:
         LLM_PROMPT = None
 
-# Initialize Sentry if configured
+# Sentry init (optional)
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 if SENTRY_DSN and SENTRY_AVAILABLE:
     try:
@@ -199,7 +212,7 @@ if SENTRY_DSN and SENTRY_AVAILABLE:
         logger.exception("Sentry init failed")
 
 # -----------------------
-# Utilities
+# Utilities / evidence
 # -----------------------
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
@@ -257,7 +270,7 @@ def store_evidence_json(source: str, data: Dict[str, Any], meta: Optional[Dict[s
     return store_evidence_binary(source, raw, meta)
 
 # -----------------------
-# Underwriter math (unchanged core)
+# Underwriter math
 # -----------------------
 def compute_britton_score(noi, price, dscr, equity_gap, prop_meta):
     try:
@@ -309,15 +322,9 @@ def underwriter_deterministic(prop: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def monte_carlo_simulation(prop: Dict[str, Any], runs: int = 2000) -> Dict[str, Any]:
-    # deterministic fallback if numpy not available
     if not NUMPY_AVAILABLE:
         det = underwriter_deterministic(prop)
-        return {
-            "runs": 1,
-            "dscr_p50": det.get("dscr"),
-            "noi_p50": det.get("noi"),
-            "yield_p50": (det.get("noi") / det.get("price") if det.get("price") else 0.0)
-        }
+        return {"runs": 1, "dscr_p50": det.get("dscr"), "noi_p50": det.get("noi"), "yield_p50": (det.get("noi") / det.get("price") if det.get("price") else 0.0)}
 
     price = float(prop.get("price", 0.0))
     gpr = float(prop.get("gpr", 0.0))
@@ -364,7 +371,7 @@ def simulate_refund_waterfall(price: float, existing_debt: float, investor_equit
     return out
 
 # -----------------------
-# Verification pipeline (stubs)
+# Verify pipeline (stubs)
 # -----------------------
 def verify_listing_pipeline(listing: Dict[str, Any], attempts: int = 5, require_checks: int = 5) -> Dict[str, Any]:
     manifest = {"id": str(uuid.uuid4()), "created": datetime.utcnow().isoformat() + "Z", "requested_attempts": attempts, "required_checks": require_checks, "checks": [], "evidence": []}
@@ -492,30 +499,49 @@ def check_photo_and_image_for_condition(listing: Dict[str, Any]) -> Dict[str, An
     return out
 
 # -----------------------
-# LLM provider helpers (unchanged core, plus small improvements)
+# LLM provider helpers
 # -----------------------
-def _retry_http_post(url: str, headers: Dict[str, str], payload: Dict[str, Any], retries: int = 5, backoff_base: float = 0.5, timeout: int = 30) -> Tuple[bool, Any]:
-    if not requests:
-        return False, {"error": "requests_not_installed"}
+def _post_json_with_retry(url: str, headers: Dict[str, str], payload: Dict[str, Any], retries: int = 5, backoff_base: float = 0.5, timeout: int = 30) -> Tuple[bool, Any]:
+    """
+    Unified HTTP POST wrapper tries requests then httpx (best-effort).
+    """
     last_err = None
     for attempt in range(retries):
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-            status = resp.status_code
-            if status in (200, 201):
-                try:
-                    return True, resp.json()
-                except Exception:
-                    return True, resp.text
-            if status in (429, 500, 502, 503):
-                wait = backoff_base * (2 ** attempt)
-                logger.debug("HTTP status %s from %s; retrying after %.2fs", status, url, wait)
-                time.sleep(wait)
-                last_err = {"status_code": status, "body": resp.text}
-                continue
-            logger.debug("HTTP non-success %s from %s: %s", status, url, resp.text[:500])
-            return False, {"status_code": status, "body": resp.text}
-        except requests.exceptions.RequestException as e:
+            if requests:
+                resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+                status = resp.status_code
+                if status in (200, 201):
+                    try:
+                        return True, resp.json()
+                    except Exception:
+                        return True, resp.text
+                if status in (429, 500, 502, 503):
+                    wait = backoff_base * (2 ** attempt)
+                    logger.debug("HTTP status %s from %s; retrying after %.2fs", status, url, wait)
+                    time.sleep(wait)
+                    last_err = {"status_code": status, "body": resp.text}
+                    continue
+                return False, {"status_code": status, "body": resp.text}
+            elif httpx:
+                with httpx.Client(timeout=timeout) as client:
+                    resp = client.post(url, json=payload, headers=headers)
+                    status = resp.status_code
+                    if status in (200, 201):
+                        try:
+                            return True, resp.json()
+                        except Exception:
+                            return True, resp.text
+                    if status in (429, 500, 502, 503):
+                        wait = backoff_base * (2 ** attempt)
+                        logger.debug("HTTPX status %s from %s; retrying after %.2fs", status, url, wait)
+                        time.sleep(wait)
+                        last_err = {"status_code": status, "body": resp.text}
+                        continue
+                    return False, {"status_code": status, "body": resp.text}
+            else:
+                return False, {"error": "no_http_client_installed"}
+        except Exception as e:
             last_err = {"exception": str(e)}
             wait = backoff_base * (2 ** attempt)
             logger.debug("HTTP request exception %s; retrying after %.2fs", e, wait)
@@ -529,7 +555,7 @@ def _call_deepseek(prompt: str, model: str = "deepseek-v3.2", max_tokens: int = 
     url = os.environ.get("DEEPSEEK_API_URL", DEEPSEEK_URL)
     headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}", "Content-Type": "application/json"}
     payload = {"model": model, "input": prompt, "max_tokens": max_tokens}
-    ok, res = _retry_http_post(url, headers, payload)
+    ok, res = _post_json_with_retry(url, headers, payload)
     if not ok:
         return {"ok": False, "error": "deepseek_failed", "detail": res}
     text = ""
@@ -554,7 +580,7 @@ def _call_groq(prompt: str, model: str = "llama-3.3-70b", max_tokens: int = 2000
     url = os.environ.get("GROQ_API_URL", GROQ_URL)
     headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
     payload = {"model": model, "prompt": prompt, "max_tokens": max_tokens}
-    ok, res = _retry_http_post(url, headers, payload)
+    ok, res = _post_json_with_retry(url, headers, payload)
     if not ok:
         return {"ok": False, "error": "groq_failed", "detail": res}
     text = ""
@@ -608,6 +634,7 @@ def _call_openai_api(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 
                         pass
             except Exception:
                 logger.debug("New OpenAI client instantiation failed", exc_info=True)
+
         if OPENAI_LEGACY and _legacy_openai is not None:
             try:
                 _legacy_openai.api_key = OPENAI_KEY
@@ -654,7 +681,7 @@ def _call_gemini(prompt: str, model: str = "gemini-2.5-pro", max_tokens: int = 1
     url = GEMINI_URL or os.environ.get("GEMINI_API_URL", "")
     headers = {"Authorization": f"Bearer {GEMINI_KEY}"} if GEMINI_KEY else {}
     payload = {"prompt": prompt, "maxOutputTokens": max_tokens}
-    ok, res = _retry_http_post(url, headers, payload)
+    ok, res = _post_json_with_retry(url, headers, payload)
     if not ok:
         return {"ok": False, "error": "gemini_failed", "detail": res}
     text = ""
@@ -714,7 +741,6 @@ def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, pr
 
         if res.get("ok") and res.get("response"):
             logger.info("Provider %s succeeded", provider)
-            # store provider evidence
             try:
                 store_evidence_json("provider_success", {"provider": provider, "prompt_hash": sha256_bytes(prompt.encode("utf-8"))}, {"provider": provider})
             except Exception:
@@ -723,13 +749,12 @@ def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, pr
         else:
             errors.append({"provider": provider, "result": res})
             logger.debug("Provider %s failed: %s", provider, res.get("error") or str(res))
-            # store provider failure evidence
             try:
                 store_evidence_json("provider_failure", {"provider": provider, "error": res}, {"provider": provider})
             except Exception:
                 pass
 
-    # Try local model as a last attempt if not yet tried
+    # Try local generation finally
     try:
         local = _generate_local(prompt, max_tokens=min(max_tokens, LOCAL_LLM_MAX_TOKENS))
         if local.get("ok") and local.get("response"):
@@ -739,7 +764,7 @@ def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, pr
         errors.append({"provider": "LOCAL", "error": str(e)})
         logger.exception("Local generation failed during fallback chain")
 
-    # Final deterministic fallback (guaranteed)
+    # Deterministic fallback guaranteed
     try:
         text = _deterministic_fallback_text(prompt)
         return {"ok": True, "response": text, "provider": "DETERMINISTIC_FALLBACK", "errors": errors}
@@ -747,26 +772,21 @@ def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, pr
         logger.exception("Deterministic fallback failed")
         return {"ok": False, "error": "no_provider_succeeded", "errors": errors, "detail": str(e)}
 
-# Backwards-compatible shim used by main.py etc.
+# Compatibility shim used by main.py
 def get_openai_response(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 1024, temperature: float = 0.0) -> Dict[str, Any]:
-    """
-    Unified interface: will use provider chain (preferred) then legacy openai, then deterministic fallback.
-    Returns {"ok": True, "response": text, "provider": provider} or {"ok": False, "error": ...}
-    """
     try:
         out = provider_generate_text_with_fallback(prompt, max_tokens=max_tokens, providers=None)
         if out.get("ok"):
             return out
     except Exception:
-        logger.exception("provider_generate_text_with_fallback failed")
-    # legacy fallback
+        logger.exception("provider_generate_text_with_fallback failed in shim")
+    # try direct openai call
     try:
         o = _call_openai_api(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
         if o.get("ok"):
             return {"ok": True, "response": o.get("response"), "provider": "OPENAI_LEGACY", "raw": o}
     except Exception:
         logger.exception("legacy openai call failed in shim")
-    # deterministic fallback
     try:
         txt = _deterministic_fallback_text(prompt)
         return {"ok": True, "response": txt, "provider": "DETERMINISTIC_FALLBACK"}
@@ -775,7 +795,7 @@ def get_openai_response(prompt: str, model: str = "gpt-4o-mini", max_tokens: int
         return {"ok": False, "error": "all_providers_failed", "detail": str(e)}
 
 # -----------------------
-# deterministic fallback builder
+# Deterministic fallback builder
 # -----------------------
 def _deterministic_fallback_text(prompt: str, min_words: int = 200) -> str:
     header = "LETTER OF INTENT — [AUTOGENERATED FALLBACK]\n\n"
@@ -793,9 +813,7 @@ def _deterministic_fallback_text(prompt: str, min_words: int = 200) -> str:
 # -----------------------
 def generate_long_loi_text(prop: Dict[str, Any], min_words: int = 2000, max_words: int = 2500) -> str:
     safe_prop = {k: v for k, v in prop.items() if k not in ("britton_score", "confidence", "internal_notes", "evidence_manifest")}
-    prompt_instructions = (
-        (LLM_PROMPT + "\n\n") if LLM_PROMPT else ""
-    ) + (
+    prompt_instructions = ((LLM_PROMPT + "\n\n") if LLM_PROMPT else "") + (
         f"You are an expert real estate acquisitions underwriter. Create a professional Letter of Intent (LOI) between {min_words} and {max_words} words for the following property data: {json.dumps(safe_prop)}. "
         "Do NOT include internal scores (britton_score/confidence) nor secret keys. Render the LOI with sections: Executive Summary, Offer Terms (3 options), Financing Structure, Contingencies, Timeline, Contact Info, and Signatures. Use professional tone and clear section headings."
     )
@@ -811,15 +829,9 @@ def generate_long_loi_text(prop: Dict[str, Any], min_words: int = 2000, max_word
     return _deterministic_fallback_text(prompt_instructions, min_words=min_words)
 
 # -----------------------
-# Meta / Facebook helpers (guarded)
+# Meta / Facebook helper (guarded)
 # -----------------------
 def meta_post_text(message: str, page_access_token: Optional[str] = None, page_id: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Post a text message to a Facebook Page (Graph API).
-    - If AUTONOMOUS_MODE is False, will queue/save as draft (store evidence) instead of posting.
-    - Requires requests and a valid PAGE_ACCESS_TOKEN and PAGE_ID.
-    Returns dict with status and provider info.
-    """
     page_access_token = page_access_token or FACEBOOK_PAGE_ACCESS_TOKEN
     page_id = page_id or FACEBOOK_PAGE_ID
     if not page_access_token or not page_id:
@@ -830,22 +842,17 @@ def meta_post_text(message: str, page_access_token: Optional[str] = None, page_i
 
     # AUTONOMOUS guard
     if not AUTONOMOUS_MODE:
-        # store draft evidence and return queued
         item = store_evidence_json("meta_post_draft", {"page_id": page_id, "message": message}, {"queued": True})
         return {"ok": True, "status": "draft_saved", "evidence": item}
 
-    if not requests:
-        logger.debug("requests not installed for meta_post_text")
-        return {"ok": False, "error": "requests_not_installed"}
-
     url = f"{FACEBOOK_GRAPH_URL}/{page_id}/feed"
     try:
-        ok, res = _retry_http_post(url, headers={}, payload=payload, retries=3)
+        ok, res = _post_json_with_retry(url, headers={}, payload=payload, retries=3)
         if ok:
-            store_evidence_json("meta_post_success", {"page_id": page_id, "message_hash": sha256_bytes(message.encode("utf-8"))}, {"provider":"facebook"})
+            store_evidence_json("meta_post_success", {"page_id": page_id, "message_hash": sha256_bytes(message.encode("utf-8"))}, {"provider": "facebook"})
             return {"ok": True, "provider": "facebook", "raw": res}
         else:
-            store_evidence_json("meta_post_failure", {"page_id": page_id, "error": res}, {"provider":"facebook"})
+            store_evidence_json("meta_post_failure", {"page_id": page_id, "error": res}, {"provider": "facebook"})
             return {"ok": False, "error": "post_failed", "detail": res}
     except Exception as e:
         logger.exception("meta_post_text failed")
@@ -855,13 +862,8 @@ def meta_post_text(message: str, page_access_token: Optional[str] = None, page_i
 # Twilio helper (guarded)
 # -----------------------
 def twilio_send_sms(to_number: str, body: str, from_number: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Send an SMS via Twilio if SDK and credentials are present.
-    If AUTONOMOUS_MODE is False, save draft to evidence and don't send.
-    """
     from_number = from_number or TWILIO_FROM
-    if not TWILIO_SDK_AVAILABLE or not TWILIO_SID or not TWILIO_AUTH:
-        # store as evidence/draft
+    if not TWILIO_SDK_AVAILABLE or not TWILIO_API_SID or not TWILIO_API_SECRET:
         item = store_evidence_json("sms_draft", {"to": to_number, "from": from_number, "body": body}, {"queued": True})
         return {"ok": False, "error": "twilio_not_configured", "draft": item}
 
@@ -870,51 +872,43 @@ def twilio_send_sms(to_number: str, body: str, from_number: Optional[str] = None
         return {"ok": True, "status": "draft_saved", "evidence": item}
 
     try:
-        client = TwilioClient(TWILIO_SID, TWILIO_AUTH)
+        client = TwilioClient(TWILIO_API_SID, TWILIO_API_SECRET)
         msg = client.messages.create(body=body, from_=from_number, to=to_number)
         ev = store_evidence_json("twilio_sent", {"sid": getattr(msg, "sid", None), "to": to_number}, {"provider": "twilio"})
         return {"ok": True, "provider": "twilio", "sid": getattr(msg, "sid", None), "evidence": ev}
     except Exception as e:
         logger.exception("twilio_send_sms failed")
-        ev = store_evidence_json("twilio_failure", {"error": str(e), "to": to_number}, {"provider":"twilio"})
+        ev = store_evidence_json("twilio_failure", {"error": str(e), "to": to_number}, {"provider": "twilio"})
         return {"ok": False, "error": str(e), "evidence": ev}
 
 # -----------------------
-# Memory / RAG helpers (flexible fallbacks)
+# Memory store (pinecone/sente/local)
 # -----------------------
 MEMORY_FILE = os.path.join(EVIDENCE_DIR, "memory.jsonl")
-# initialize pinecone if configured
+
+# init pinecone if configured
+pindex = None
 if VECTOR_DB.upper() == "PINECONE" and PINECONE_API_KEY and PINECONE_AVAILABLE:
     try:
         pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENV)
-        PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX", "britton-memory")
         if PINECONE_INDEX_NAME not in pinecone.list_indexes():
             pinecone.create_index(PINECONE_INDEX_NAME, dimension=1536)
         pindex = pinecone.Index(PINECONE_INDEX_NAME)
-        logger.debug("Pinecone initialized and index connected")
+        logger.debug("Pinecone initialized")
     except Exception:
         logger.exception("Pinecone init failed")
         pindex = None
-else:
-    pindex = None
 
-# sentence-transformer model if available
 _sente_model = None
 if SENTE_AVAILABLE:
     try:
         _sente_model = SentenceTransformer(os.environ.get("SENTE_MODEL", "all-MiniLM-L6-v2"))
     except Exception:
         _sente_model = None
-        logger.exception("sentence-transformer model load failed")
+        logger.exception("sentence model load failed")
 
 def _embed_text(text: str) -> List[float]:
-    """
-    Returns an embedding vector using best available method:
-    1) If pinecone & OpenAI embeddings available -> call OpenAI embeddings (legacy)
-    2) If sentence-transformers available -> use it
-    3) else -> fallback to hashed pseudo-vector (not semantic)
-    """
-    # Attempt OpenAI embeddings via legacy client if available
+    # 1) OpenAI embeddings via legacy client
     if OPENAI_KEY and OPENAI_LEGACY and _legacy_openai:
         try:
             _legacy_openai.api_key = OPENAI_KEY
@@ -924,26 +918,24 @@ def _embed_text(text: str) -> List[float]:
                 return vec
         except Exception:
             logger.exception("OpenAI embedding failed")
-    # sentence-transformers
+    # 2) sentence-transformers
     if _sente_model:
         try:
-            return _sente_model.encode(text).tolist()
+            vec = _sente_model.encode(text)
+            return vec.tolist() if hasattr(vec, "tolist") else list(map(float, vec))
         except Exception:
-            logger.exception("Sentence-transformer encode failed")
-    # hashed fallback: deterministic pseudo-vector
+            logger.exception("sentence-transformer embedding failed")
+    # 3) hashed pseudo-vector fallback
     h = hashlib.sha256(text.encode("utf-8")).digest()
-    # produce small numeric vector
     vec = [float(b) for b in h[:64]]
     return vec
 
 def memory_upsert(id: str, text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     meta = meta or {}
     rec = {"id": id, "text": text, "meta": meta, "ts": datetime.utcnow().isoformat() + "Z"}
-    # embedding and push to pinecone if available
     try:
         vec = _embed_text(text)
         rec["vector_len"] = len(vec)
-        # push to pinecone if configured
         if pindex:
             try:
                 pindex.upsert([(id, vec, meta)])
@@ -952,7 +944,6 @@ def memory_upsert(id: str, text: str, meta: Optional[Dict[str, Any]] = None) -> 
                 logger.exception("pinecone upsert failed")
     except Exception:
         logger.exception("embedding failed during upsert")
-    # write to local jsonl
     try:
         with open(MEMORY_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
@@ -975,7 +966,6 @@ def _load_memory_local() -> List[Dict[str, Any]]:
     return out
 
 def _cosine_sim(a: List[float], b: List[float]) -> float:
-    # simple cosine; guard against zero
     try:
         import math
         dot = sum(x*y for x,y in zip(a,b))
@@ -988,50 +978,35 @@ def _cosine_sim(a: List[float], b: List[float]) -> float:
         return 0.0
 
 def memory_query(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-    """
-    Query memory:
-    - If pindex available -> use vector query
-    - Else use sentence-transformer embedding and local vector compare
-    - Else naive substring matching
-    Returns list of records with 'score' descending
-    """
     results = []
     try:
         qvec = _embed_text(query)
         if pindex:
             try:
                 res = pindex.query(qvec, top_k=top_k, include_metadata=True, include_values=False)
-                for match in res["matches"]:
-                    results.append({"id": match["id"], "score": match["score"], "meta": match.get("metadata")})
+                for m in res.get("matches", []):
+                    results.append({"id": m.get("id"), "score": m.get("score"), "meta": m.get("metadata")})
                 return results
             except Exception:
                 logger.exception("pinecone query failed")
-        # local compare
         mem = _load_memory_local()
-        if mem and (_sente_model or True):
-            # attempt to compare by embedding text vectors stored if available
-            scored = []
-            for r in mem:
-                try:
-                    if "vector_len" in r:
-                        sval = _embed_text(r["text"])  # not ideal but works for fallback compare
-                        sc = _cosine_sim(qvec, sval)
-                        scored.append((sc, r))
-                    else:
-                        # fallback substring score
-                        sc = sum(1 for w in query.lower().split() if w in r.get("text", "").lower())
-                        scored.append((float(sc), r))
-                except Exception:
-                    continue
-            scored.sort(key=lambda x: x[0], reverse=True)
-            for sc, r in scored[:top_k]:
-                rcopy = dict(r)
-                rcopy["score"] = sc
-                results.append(rcopy)
-            return results
+        scored = []
+        for r in mem:
+            try:
+                sval = _embed_text(r.get("text", ""))
+                sc = _cosine_sim(qvec, sval)
+                scored.append((sc, r))
+            except Exception:
+                continue
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for sc, r in scored[:top_k]:
+            rcopy = dict(r)
+            rcopy["score"] = sc
+            results.append(rcopy)
+        return results
     except Exception:
         logger.exception("memory_query failed")
-    # very last-resort substring search
+    # substring fallback
     mem = _load_memory_local()
     scored = []
     for r in mem:
@@ -1051,6 +1026,7 @@ def diagnostics_report() -> Dict[str, Any]:
         "time": datetime.utcnow().isoformat() + "Z",
         "components": {
             "requests": bool(requests),
+            "httpx": bool(httpx),
             "boto3": bool(boto3),
             "numpy": NUMPY_AVAILABLE,
             "transformers": TRANSFORMERS_AVAILABLE,
@@ -1073,27 +1049,26 @@ def diagnostics_report() -> Dict[str, Any]:
             "MODEL_PROVIDER_TERTIARY": MODEL_PROVIDER_TERTIARY,
             "LOCAL_LLM_MODEL": LOCAL_LLM_MODEL if TRANSFORMERS_AVAILABLE else None,
             "FACEBOOK_CONFIGURED": bool(FACEBOOK_PAGE_ACCESS_TOKEN and FACEBOOK_PAGE_ID),
-            "TWILIO_CONFIGURED": bool(TWILIO_SID and TWILIO_AUTH and TWILIO_SDK_AVAILABLE),
+            "TWILIO_CONFIGURED": bool(TWILIO_API_SID and TWILIO_API_SECRET and TWILIO_SDK_AVAILABLE),
             "VECTOR_DB": VECTOR_DB or "LOCAL"
         }
     }
     return report
 
 # -----------------------
-# Module self-test / CLI helpers
+# CLI helpers for quick local tests
 # -----------------------
 def _selftest_print():
     print(json.dumps(diagnostics_report(), indent=2))
 
 def diagnostics_cli_test_loi():
-    sample_prop = {"address": "123 Test St", "price": 500000, "gpr": 60000}
+    sample_prop = {"address": "123 Test St", "price": 500000, "gpr": 60000, "tags":["motivated"]}
     loi = generate_long_loi_text(sample_prop, min_words=200, max_words=400)
     ev = store_evidence_json("sample_loi", {"loi_preview": loi[:200]}, {"address": sample_prop.get("address")})
     print("LOI preview:", loi[:400])
     print("Evidence:", ev)
 
 if __name__ == "__main__":
-    # Simple CLI: diag or test-loi
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "diag"
     if cmd == "diag":
