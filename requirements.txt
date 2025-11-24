@@ -21,7 +21,7 @@ alembic==1.11.1
 # === Queues & background jobs ===
 redis==4.5.5
 rq==1.1.0
-celery[redis]==5.6.0  # UPDATED: compatible with Python 3.12
+celery[redis]==5.5.3  # UPDATED: compatible with Python 3.12
 
 # === ML / modeling / stats (for online + fallback) ===
 scikit-learn==1.2.2
