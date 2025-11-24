@@ -1,109 +1,92 @@
 # === Core runtime / utilities ===
-requests>=2.28
-python-dotenv>=1.0
-beautifulsoup4>=4.11
-pandas>=1.5
-numpy>=1.23
-uuid>=1.30.0
+requests==2.28.2
+python-dotenv==1.0.0
+beautifulsoup4==4.11.1
+pandas==1.5.3
+numpy==1.23.5
+uuid==1.30.0
 
 # === Web / app servers & UX ===
-Flask>=2.2
-gunicorn>=20.1
-uvicorn>=0.22.0
-streamlit>=1.20
+Flask==2.2.5
+gunicorn==20.1.0
+uvicorn==0.22.0
+streamlit==1.20.0
 
 # === DB, ORM, migrations ===
-SQLAlchemy>=1.4
-sqlalchemy-utils>=0.41.0
-psycopg2-binary>=2.9.6
-alembic>=1.11
+SQLAlchemy==1.4.52
+sqlalchemy-utils==0.41.0
+psycopg2-binary==2.9.6
+alembic==1.11.1
 
 # === Queues & background jobs ===
-redis>=4.5.5
-rq>=1.1.0
-celery[redis]>=5.3.2
+redis==4.5.5
+rq==1.1.0
+celery[redis]==5.3.2
 
-# === ML / modeling / stats ===
-scikit-learn>=1.2
-xgboost>=1.7
-joblib>=1.3
-matplotlib>=3.6
+# === ML / modeling / stats (for online + fallback) ===
+scikit-learn==1.2.2
+xgboost==1.7.5
+joblib==1.3.2
+matplotlib==3.6.3
 
 # === OpenAI / LLM / APIs / embeddings ===
-openai>=0.27
-tavily-python>=0.3.5
-twilio>=8.0
-sentence-transformers>=2.2.2
-pinecone-client>=2.2.1
+openai==0.27.8
+tavily-python==0.3.5
+twilio==8.0.1
+sentence-transformers==2.2.2
+pinecone-client==2.2.1
 
-# === Transformers & local inference (optional / fallback LLM) ===
-transformers>=4.35
-torch>=2.2.0        # install CPU or GPU variant per your machine
-accelerate>=0.25.0  # optional helper for local model efficiency
+# === Transformers & local inference (optional fallback LLM) ===
+transformers==4.35.0
+torch==2.2.0        # CPU-only; for GPU use torch==2.2.0+cu118 or matching CUDA
+accelerate==0.25.0
 
 # === AWS / storage / S3 ===
-boto3>=1.26
+boto3==1.26.152
 s3fs==2023.12.1
 fsspec==2023.12.1
 
 # === Documents & reporting ===
-python-docx>=0.8.11
-openpyxl>=3.1.2
-xlsxwriter>=3.1.2
-reportlab>=4.0
-Pillow>=9.5
-pdfminer.six>=20221105
+python-docx==0.8.11
+openpyxl==3.1.2
+xlsxwriter==3.1.2
+reportlab==4.0
+Pillow==9.5.0
+pdfminer.six==20221105
 
 # === HTTP clients & async ===
-httpx>=0.24
-aiohttp>=3.8
+httpx==0.24.1
+aiohttp==3.8.4
 
 # === Scraping / headless browsers ===
-playwright>=1.33.0        # run `python -m playwright install chromium` at build-time
-selenium>=4.10.0
-undetected-chromedriver>=3.4.0
+playwright==1.33.0          # Remember: install chromium at build-time: python -m playwright install chromium
+selenium==4.10.0
+undetected-chromedriver==3.4.0
 
 # === Search / indexing / analytics ===
-elasticsearch>=8.8.0
-prometheus-client>=0.16.0
-opentelemetry-api>=1.14.0
-opentelemetry-sdk>=1.14.0
+elasticsearch==8.8.0
+prometheus-client==0.16.0
+opentelemetry-api==1.14.0
+opentelemetry-sdk==1.14.0
 
 # === Geospatial & address tools ===
-geopy>=2.3.0
-usaddress>=0.5.10
-shapely>=2.0.1
-geoalchemy2>=0.11.3
+geopy==2.3.0
+usaddress==0.5.10
+shapely==2.0.1
+geoalchemy2==0.11.3
 
 # === Validation / data modeling ===
-pydantic>=1.10
+pydantic==1.10.12
 
 # === File type detection / magic ===
-python-magic>=0.4.27
+python-magic==0.4.27
 
 # === Security / encryption / auth ===
-cryptography>=41.0
-python-jose>=3.3.0
+cryptography==41.0
+python-jose==3.3.0
 
 # === Monitoring / error tracking ===
-sentry-sdk>=1.28.0
-
-# === Testing & CI tooling ===
-pytest>=7.0
-pytest-cov>=4.0
-coverage>=6.0
-flake8>=6.0
-
-# === Lint & formatting (dev) ===
-black>=24.3
-isort>=6.0
+sentry-sdk==1.28.0
 
 # === Optional convenience / integrations ===
-python-multipart>=0.0.6
-
-# === Notes / production tips ===
-# - Playwright browsers MUST be installed at build-time:
-#   `python -m playwright install chromium`
-# - Torch and transformers allow fallback LLM if API credits run out
-# - For production container, remove heavy dev-only libs if needed
-# - This file includes everything your system needs to run fully offline for fallback LLM and fully online for API LLM
+python-multipart==0.0.6
