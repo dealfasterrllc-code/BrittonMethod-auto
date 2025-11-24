@@ -7,19 +7,25 @@ import os
 from datetime import timedelta
 
 # -----------------------
-# Worker & concurrency
+# CPU / workers / concurrency
 # -----------------------
-CPU_COUNT = multiprocessing.cpu_count()
-# Classic formula: (2 x $num_cores) + 1 -> sensible default for sync workers
-DEFAULT_WORKERS = (CPU_COUNT * 2) + 1
-workers = int(os.environ.get("GUNICORN_WORKERS", DEFAULT_WORKERS))
+# Allow override of CPU count for container environments where cpu_count() is misleading
+CPU_COUNT = int(os.environ.get("CPU_COUNT", multiprocessing.cpu_count()))
+# Classic formula default: (2 x num_cores) + 1
+DEFAULT_WORKERS = max(1, (CPU_COUNT * 2) + 1)
+# Read requested workers, fall back to formula
+_requested_workers = int(os.environ.get("GUNICORN_WORKERS", DEFAULT_WORKERS))
 
-# Choose worker class: 'gthread' is a good general-purpose choice for IO heavy apps.
-# If you plan to run pure-async (uvicorn/asgi), use 'uvicorn.workers.UvicornWorker'
+# Cap workers so small memory hosts don't spawn too many processes
+MAX_WORKERS_CAP = int(os.environ.get("MAX_WORKERS_CAP", 8))
+workers = min(_requested_workers, MAX_WORKERS_CAP)
+
+# Worker class: gthread is a good general-purpose choice for IO-heavy apps.
+# For async frameworks consider 'uvicorn.workers.UvicornWorker'
 worker_class = os.environ.get("GUNICORN_WORKER_CLASS", "gthread")
 
-# Threads for gthread; ignored if using sync or async worker classes
-threads = int(os.environ.get("GUNICORN_THREADS", os.environ.get("GUNICORN_THREAD_COUNT", 4)))
+# Threads per worker (for gthread); keep conservative default for low-memory hosts
+threads = int(os.environ.get("GUNICORN_THREADS", os.environ.get("GUNICORN_THREAD_COUNT", 2)))
 
 # -----------------------
 # Timeouts & graceful shutdowns
@@ -42,14 +48,22 @@ max_requests_jitter = int(os.environ.get("GUNICORN_MAX_REQUESTS_JITTER", 100))
 # -----------------------
 # Bind / reload / logging
 # -----------------------
-bind = "0.0.0.0:" + os.environ.get("PORT", "10000")
+# Prefer using $PORT injected by platform; fallback to 8000 for local dev
+bind = "0.0.0.0:" + os.environ.get("PORT", "8000")
+
 # In production, reload should remain False. Set to True only in local dev.
 reload = os.environ.get("GUNICORN_RELOAD", "false").lower() in ("1", "true", "yes")
 
-# Access & error logs go to stdout/stderr so container logs capture them
+# Access & error logs go to stdout/stderr
 accesslog = os.environ.get("GUNICORN_ACCESS_LOG", "-")  # "-" = stdout
 errorlog = os.environ.get("GUNICORN_ERROR_LOG", "-")    # "-" = stderr
 loglevel = os.environ.get("GUNICORN_LOG_LEVEL", "info")
+
+# Structured-ish access log format (common fields)
+access_log_format = os.environ.get(
+    "GUNICORN_ACCESS_FORMAT",
+    '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
+)
 
 # -----------------------
 # Security & limits
@@ -63,32 +77,31 @@ limit_request_field_size = int(os.environ.get("GUNICORN_LIMIT_REQUEST_FIELD_SIZE
 # Misc / tuning
 # -----------------------
 # Preload the application code before the worker processes are forked.
-# This reduces memory use (on platforms supporting copy-on-write) and speeds boot.
-preload_app = os.environ.get("GUNICORN_PRELOAD", "true").lower() in ("1", "true", "yes")
+# Set to True only if host supports copy-on-write and you have sufficient memory.
+preload_app = os.environ.get("GUNICORN_PRELOAD", "false").lower() in ("1", "true", "yes")
 
-# Enable daemonize? Not recommended in containerized systems
+# Daemonize? Not recommended in containerized systems
 daemon = False
 
 # Worker connection backlog
 backlog = int(os.environ.get("GUNICORN_BACKLOG", 2048))
 
-# File descriptor soft/hard limits (optional)
-# You can raise these in entrypoint or Dockerfile if needed; leaving unset here.
-
 # -----------------------
-# Hooks (optional) — simple logging on worker start/stop
+# Hooks — lightweight logging
 # -----------------------
 def on_starting(server):
-    server.log.info("Gunicorn starting — workers=%s threads=%s worker_class=%s", workers, threads, worker_class)
+    server.log.info(
+        "Gunicorn starting — workers=%s threads=%s worker_class=%s cpu_count=%s max_workers_cap=%s",
+        workers, threads, worker_class, CPU_COUNT, MAX_WORKERS_CAP
+    )
 
 def when_ready(server):
-    server.log.info("Gunicorn when_ready: server is ready; pid=%s", os.getpid())
+    server.log.info("Gunicorn ready — pid=%s", os.getpid())
 
 def on_exit(server):
     server.log.info("Gunicorn exiting — pid=%s", os.getpid())
 
 def worker_int(worker):
-    # called when worker receives INT or QUIT signal
     worker.log.info("Worker %s received INT/QUIT signal", worker.pid)
 
 def worker_abort(worker):
