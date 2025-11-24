@@ -1,0 +1,9 @@
+# === Testing / coverage ===
+pytest==7.4.0
+pytest-cov==4.1.0
+coverage==6.6.0
+
+# === Lint / formatting ===
+flake8==6.0.0
+black==24.3
+isort==6.0.0
