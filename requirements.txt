@@ -2,8 +2,8 @@
 requests==2.28.2
 python-dotenv==1.0.0
 beautifulsoup4==4.11.1
-pandas==1.5.3
-numpy==1.23.5
+pandas>=2.1.0
+numpy>=2.3.0
 uuid==1.30.0
 
 # === Web / app servers & UX ===
@@ -15,7 +15,7 @@ streamlit==1.20.0
 # === DB, ORM, migrations ===
 SQLAlchemy==1.4.52
 sqlalchemy-utils==0.41.0
-psycopg2-binary==2.9.6
+psycopg2-binary>=2.9.6
 alembic==1.11.1
 
 # === Queues & background jobs ===
