@@ -4,6 +4,7 @@ python-dotenv>=1.0
 beautifulsoup4>=4.11
 pandas>=1.5
 numpy>=1.23
+uuid>=1.30.0
 
 # === Web / app servers & UX ===
 Flask>=2.2
@@ -35,12 +36,10 @@ twilio>=8.0
 sentence-transformers>=2.2.2
 pinecone-client>=2.2.1
 
-# === Transformers & local inference (optional / heavy) ===
-# NOTE: transformers and torch are heavy. Only install if you intend to run local LLM inference.
+# === Transformers & local inference (optional / fallback LLM) ===
 transformers>=4.35
-# If you need torch for local inference, install an appropriate build for your environment (cpu or cuda).
-# Example (CPU): pip install torch --index-url https://download.pytorch.org/whl/cpu
-# Recommended: install torch separately per your environment; not pinned here.
+torch>=2.2.0        # install CPU or GPU variant per your machine
+accelerate>=0.25.0  # optional helper for local model efficiency
 
 # === AWS / storage / S3 ===
 boto3>=1.26
@@ -60,7 +59,7 @@ httpx>=0.24
 aiohttp>=3.8
 
 # === Scraping / headless browsers ===
-playwright>=1.33.0        # requires `python -m playwright install chromium` after install
+playwright>=1.33.0        # run `python -m playwright install chromium` at build-time
 selenium>=4.10.0
 undetected-chromedriver>=3.4.0
 
@@ -89,9 +88,6 @@ python-jose>=3.3.0
 # === Monitoring / error tracking ===
 sentry-sdk>=1.28.0
 
-# === Visualization / plotting helpers ===
-matplotlib>=3.6
-
 # === Testing & CI tooling ===
 pytest>=7.0
 pytest-cov>=4.0
@@ -102,16 +98,12 @@ flake8>=6.0
 black>=24.3
 isort>=6.0
 
-# === Optional heavy ML (manual install recommended) ===
-# If you want local model inference with torch, install torch separately (select CUDA/cpu wheel).
-# Example (CPU): pip install torch --index-url https://download.pytorch.org/whl/cpu
-# Uncomment to include in automated installs (may increase image size substantially):
-# torch>=2.2.0
-
 # === Optional convenience / integrations ===
 python-multipart>=0.0.6
 
-# === Notes / recommendations ===
-# - Playwright needs browser binaries: run `python -m playwright install chromium` after install.
-# - If building a smaller production container, remove optional heavy libs (transformers, torch, selenium, xgboost, streamlit, playwright).
-# - For vector DB memory, pinecone-client is included; if you use pgvector instead, add the appropriate DB driver and client packages.
+# === Notes / production tips ===
+# - Playwright browsers MUST be installed at build-time:
+#   `python -m playwright install chromium`
+# - Torch and transformers allow fallback LLM if API credits run out
+# - For production container, remove heavy dev-only libs if needed
+# - This file includes everything your system needs to run fully offline for fallback LLM and fully online for API LLM
