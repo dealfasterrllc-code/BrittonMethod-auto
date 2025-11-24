@@ -1,166 +1,128 @@
 # ---------- Multi-stage Dockerfile for DealFasterr / BrittonMethod ----------
-# Production-ready, flexible, and configurable.
-# Usage examples at the end of this file.
+# Production-ready, CPU-only ML by default. Optional heavy components installed via build-args.
 
 # ---------- Builder stage ----------
-FROM python:3.11-slim AS builder
+FROM python:3.11.9-slim AS builder
 
 LABEL maintainer="DealFasterr / BrittonMethod <ops@dealfasterr.com>" \
-      org.opencontainers.image.source="https://github.com/your/repo"
+      org.opencontainers.image.source="https://github.com/dealfasterrllc-code/BrittonMethod-auto"
 
-# Build args to toggle optional heavy installs
-ARG INSTALL_PLAYWRIGHT="1"    # 1 to install playwright browsers (chromium)
-ARG INSTALL_TRANSFORMERS="0"  # 1 to install transformers (heavy)
-ARG INSTALL_TORCH="0"         # 1 to install torch (very heavy, install separately if CUDA required)
+# Build-time toggles
+ARG INSTALL_PLAYWRIGHT="0"
+ARG INSTALL_TRANSFORMERS="0"
+ARG INSTALL_TORCH="0"
+ARG VENV_PATH="/opt/venv"
+ARG PLAYWRIGHT_BROWSERS_PATH="/ms-playwright"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
-    VENV_PATH=/opt/venv \
-    PIP_NO_CACHE_DIR=1
+    VENV_PATH=${VENV_PATH} \
+    PIP_NO_CACHE_DIR=1 \
+    PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH}
 
 WORKDIR /app
 
-# Install system deps required to build wheels and optional Playwright runtime libs
+# Install essential build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    curl \
-    wget \
-    gnupg \
-    git \
-    unzip \
-    libnss3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libgbm1 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libxrandr2 \
-    libgtk-3-0 \
-    libgconf-2-4 \
-    libx11-xcb1 \
-    libxss1 \
-    libxtst6 \
-    ca-certificates \
-    locales \
+    build-essential curl wget ca-certificates git unzip gnupg locales procps \
  && rm -rf /var/lib/apt/lists/*
 
-# Copy only dependency list first for layer caching
+# Optional OS dependencies for Playwright
+RUN if [ "${INSTALL_PLAYWRIGHT}" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        libnss3 libatk1.0-0 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 \
+        libxdamage1 libxfixes3 libgbm1 libasound2 libpangocairo-1.0-0 libxrandr2 \
+        libgtk-3-0 libgconf-2-4 libx11-xcb1 libxss1 libxtst6 fonts-liberation \
+      && rm -rf /var/lib/apt/lists/*; \
+    else \
+      echo "Playwright not requested: skipping heavy OS libs"; \
+    fi
+
+# Copy requirements first
 COPY requirements.txt /app/requirements.txt
 
-# Create virtualenv and install base Python deps
+# Create virtualenv and install Python packages
 RUN python -m venv ${VENV_PATH} \
-    && ${VENV_PATH}/bin/pip install --upgrade pip setuptools wheel \
-    && if [ "${INSTALL_TRANSFORMERS}" = "1" ] ; then \
-         # when transformers requested, include it and let pip resolve heavy libs
-         ${VENV_PATH}/bin/pip install --no-cache-dir -r /app/requirements.txt; \
-       else \
-         # Install all except heavy optional packages by filtering them out temporarily
-         # (We assume requirements.txt contains transformers & torch as comments or optional; if not, install whole file)
-         ${VENV_PATH}/bin/pip install --no-cache-dir -r /app/requirements.txt; \
-       fi
+ && ${VENV_PATH}/bin/pip install --upgrade pip setuptools wheel \
+ && ${VENV_PATH}/bin/pip install --no-cache-dir -r /app/requirements.txt
 
-# Install Playwright browsers if requested (builder stage)
-# Playwright requires extra packages which were installed above.
-RUN if [ "${INSTALL_PLAYWRIGHT}" = "1" ] ; then \
-      ${VENV_PATH}/bin/python -m playwright install --with-deps chromium ; \
-    else \
-      echo "Playwright install skipped" ; \
+ENV PATH="${VENV_PATH}/bin:$PATH"
+
+# Optional Playwright + Chromium installation
+RUN if [ "${INSTALL_PLAYWRIGHT}" = "1" ]; then \
+      pip install --no-cache-dir playwright ; \
+      PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH} python -m playwright install --with-deps chromium ; \
     fi
 
-# If user requested torch install at build time (not recommended in normal CI due to size),
-# allow it via build-arg INSTALL_TORCH=1 and put torch install here; recommends installing via separate step
-# depending on target (cpu/cuda). This block is intentionally commented to preserve small default images.
-RUN if [ "${INSTALL_TORCH}" = "1" ] ; then \
-      echo "Installing torch - ensure this is what you want (very large image)"; \
-      ${VENV_PATH}/bin/pip install --no-cache-dir torch ; \
-    else \
-      echo "Torch not installed" ; \
-    fi
+# Optional heavy ML packages
+RUN if [ "${INSTALL_TRANSFORMERS}" = "1" ]; then pip install --no-cache-dir transformers; fi
+RUN if [ "${INSTALL_TORCH}" = "1" ]; then pip install --no-cache-dir torch cpuonly; fi
 
-# Clean builder apt caches
-RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/*
+# Prepare evidence directory
+RUN mkdir -p /tmp/britton_evidence && chmod 0755 /tmp/britton_evidence
 
 # ---------- Runtime stage ----------
-FROM python:3.11-slim AS runtime
+FROM python:3.11.9-slim AS runtime
 
 LABEL maintainer="DealFasterr / BrittonMethod <ops@dealfasterr.com>"
 
-ARG INSTALL_PLAYWRIGHT="1"
+ARG VENV_PATH="/opt/venv"
+ARG PLAYWRIGHT_BROWSERS_PATH="/ms-playwright"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
-    VENV_PATH=/opt/venv \
+    VENV_PATH=${VENV_PATH} \
+    PATH="${VENV_PATH}/bin:$PATH" \
     PORT=10000 \
     EVIDENCE_DIR=/tmp/britton_evidence \
-    PIP_NO_CACHE_DIR=1
+    PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH} \
+    PIP_NO_CACHE_DIR=1 \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 WORKDIR /app
 
-# Install minimal runtime libs needed for Playwright and system utilities (curl, tini)
+# Minimal runtime OS packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnss3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libgbm1 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libxrandr2 \
-    libgtk-3-0 \
-    libgconf-2-4 \
-    libx11-xcb1 \
-    libxss1 \
-    libxtst6 \
-    tini \
-    curl \
+    tini curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Copy prebuilt virtualenv from builder
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Copy virtualenv from builder
+COPY --from=builder ${VENV_PATH} ${VENV_PATH}
 
-# Copy application code (minimal) after venv to improve cache
-# .dockerignore should exclude large files, .git, node_modules, data, etc.
+# Copy source code
 COPY . /app
 
-# Ensure evidence dir exists and set permissions for non-root user
-RUN mkdir -p ${EVIDENCE_DIR} \
-    && groupadd -g 1000 appgroup || true \
-    && useradd --create-home --no-log-init --uid 1000 --gid appgroup --shell /bin/bash appuser || true \
-    && chown -R appuser:appgroup /app /opt/venv ${EVIDENCE_DIR}
+# Copy Playwright browsers if installed
+COPY --from=builder ${PLAYWRIGHT_BROWSERS_PATH} ${PLAYWRIGHT_BROWSERS_PATH} || true
+RUN if [ -d "${PLAYWRIGHT_BROWSERS_PATH}" ]; then chmod -R 0755 ${PLAYWRIGHT_BROWSERS_PATH}; fi
 
-# Switch to non-root user
+# Ensure evidence dir exists and create safe non-root user
+RUN mkdir -p ${EVIDENCE_DIR} \
+    && groupadd --gid 1000 appgroup || true \
+    && useradd --create-home --no-log-init --uid 1000 --gid appgroup --shell /usr/sbin/nologin appuser || true \
+    && chown -R appuser:appgroup /app ${VENV_PATH} ${EVIDENCE_DIR} ${PLAYWRIGHT_BROWSERS_PATH} \
+    && chmod -R 0755 /app ${VENV_PATH} ${EVIDENCE_DIR}
+
 USER appuser
 
-# Expose data volume for evidence persistence (optional)
 VOLUME ["${EVIDENCE_DIR}"]
-
-# Expose port for service
 EXPOSE ${PORT}
 
-# Healthcheck for container orchestrators (Render expects /health)
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:${PORT}/health || exit 1
 
-# Use tini for proper signal handling
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Default Gunicorn config: tune workers with environment if desired
-# You can override via command line or Render "Start Command"
-ENV GUNICORN_WORKERS=3 \
-    GUNICORN_THREADS=4 \
+# Gunicorn defaults
+ENV GUNICORN_WORKERS=2 \
+    GUNICORN_THREADS=2 \
     GUNICORN_TIMEOUT=120
 
-# Start Gunicorn server (bind to all interfaces). Keep this simple to avoid shell escaping issues.
-CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:10000", "--workers", "3", "--threads", "4", "--timeout", "120", "--log-level", "info"]
+# Make entrypoint executable
+RUN chmod +x /app/entrypoint.sh
+
+# Default CMD
+CMD ["./entrypoint.sh"]

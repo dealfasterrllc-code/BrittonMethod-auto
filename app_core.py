@@ -2,23 +2,14 @@
 """
 app_core.py — final production-ready core for Britton Method
 
-Compatibility:
-- Designed to work with the project's requirements (requests, numpy, openai, transformers optional, twilio optional, pinecone optional, sentence-transformers optional).
-- All external connectors are optional and guarded; missing packages or missing keys won't crash the process.
-- Deterministic fallback ALWAYS works — guaranteed free operation.
-
-Features:
-- Evidence store (disk + optional S3)
-- Deterministic underwriter & Britton score
-- Monte Carlo (numpy optional)
-- Refund waterfall simulation
-- Listing verification pipeline (stubs capturing evidence)
-- LLM provider chain with retries: DeepSeek -> GROQ -> OpenAI (new + legacy) -> Gemini -> Local transformers -> Deterministic fallback
-- LOI generator (provider chain + deterministic fallback)
-- Meta (Facebook) posting helper (guarded)
-- Twilio SMS helper (guarded)
-- Memory store: Pinecone (optional) / sentence-transformers (optional) / local JSONL fallback
-- Diagnostics
+Compatibility and guarantees:
+- All external connectors are optional and guarded (requests, httpx, boto3, pinecone,
+  sentence-transformers, transformers, twilio, openai).
+- Deterministic fallback ALWAYS works: system can generate LOIs without any 3rd-party keys.
+- Preserves original business logic: underwriter_deterministic, monte_carlo_simulation,
+  simulate_refund_waterfall, verify_listing_pipeline and LOI generation behavior remain unchanged.
+- Evidence store writes to disk and can optionally upload to S3.
+- Provider chain (configurable): DEEPSEEK -> GROQ -> OPENAI (new + legacy) -> GEMINI -> LOCAL -> DETERMINISTIC
 """
 
 from __future__ import annotations
@@ -27,56 +18,53 @@ import os
 import json
 import hashlib
 import uuid
-import sys
 import time
 import traceback
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 
+# -----------------------
 # Logging
+# -----------------------
 logger = logging.getLogger("app_core")
 if not logger.handlers:
-    h = logging.StreamHandler()
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-    h.setFormatter(fmt)
-    logger.addHandler(h)
-logger.setLevel(os.environ.get("APP_CORE_LOG_LEVEL", "INFO"))
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(os.environ.get("APP_CORE_LOG_LEVEL", "INFO").upper())
 
 # -----------------------
-# Optional libraries (guarded imports)
+# Optional libraries (guarded)
 # -----------------------
-# httpx as alternative to requests (requirements include httpx)
 try:
-    import httpx
-except Exception:
-    httpx = None
-
-try:
-    import requests
+    import requests  # type: ignore
 except Exception:
     requests = None
     logger.debug("requests not available; httpx may be used")
 
 try:
-    import boto3
+    import httpx  # type: ignore
 except Exception:
-    boto3 = None
-    logger.debug("boto3 not available")
+    httpx = None
 
 try:
-    import numpy as np
+    import boto3  # type: ignore
+except Exception:
+    boto3 = None
+
+try:
+    import numpy as np  # type: ignore
     NUMPY_AVAILABLE = True
 except Exception:
     np = None
     NUMPY_AVAILABLE = False
-    logger.debug("numpy not available")
+    logger.debug("numpy not available; monte carlo will fallback to deterministic")
 
-# OpenAI: legacy and new client
+# OpenAI clients (legacy and new)
 try:
-    import openai as _legacy_openai
+    import openai as _legacy_openai  # type: ignore
     OPENAI_LEGACY = True
-    logger.debug("legacy openai package available")
 except Exception:
     _legacy_openai = None
     OPENAI_LEGACY = False
@@ -84,57 +72,48 @@ except Exception:
 try:
     from openai import OpenAI as OpenAIClient  # type: ignore
     OPENAI_NEW = True
-    logger.debug("new OpenAI client class available")
 except Exception:
     OpenAIClient = None
     OPENAI_NEW = False
 
-# Transformers local model
+# Transformers local model (lazy)
 try:
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    import torch
+    from transformers import AutoTokenizer, AutoModelForCausalLM  # type: ignore
+    import torch  # type: ignore
     TRANSFORMERS_AVAILABLE = True
-    logger.debug("transformers available")
 except Exception:
     AutoTokenizer = None
     AutoModelForCausalLM = None
     torch = None
     TRANSFORMERS_AVAILABLE = False
-    logger.debug("transformers not available")
 
-# sentence-transformers for embeddings
+# sentence-transformers
 try:
-    from sentence_transformers import SentenceTransformer
+    from sentence_transformers import SentenceTransformer  # type: ignore
     SENTE_AVAILABLE = True
-    logger.debug("sentence-transformers available")
 except Exception:
     SentenceTransformer = None
     SENTE_AVAILABLE = False
-    logger.debug("sentence-transformers not available")
 
-# pinecone optional
+# pinecone
 try:
-    import pinecone
+    import pinecone  # type: ignore
     PINECONE_AVAILABLE = True
-    logger.debug("pinecone SDK available")
 except Exception:
     pinecone = None
     PINECONE_AVAILABLE = False
-    logger.debug("pinecone not available")
 
-# twilio optional
+# twilio
 try:
-    from twilio.rest import Client as TwilioClient
+    from twilio.rest import Client as TwilioClient  # type: ignore
     TWILIO_SDK_AVAILABLE = True
-    logger.debug("twilio SDK available")
 except Exception:
     TwilioClient = None
     TWILIO_SDK_AVAILABLE = False
-    logger.debug("twilio SDK not available")
 
-# sentry optional
+# sentry
 try:
-    import sentry_sdk
+    import sentry_sdk  # type: ignore
     SENTRY_AVAILABLE = True
 except Exception:
     sentry_sdk = None
@@ -150,7 +129,7 @@ USE_S3 = os.environ.get("USE_S3", "false").lower() in ("1", "true", "yes")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 S3_REGION = os.environ.get("S3_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 
-# API Keys & endpoints
+# Providers & keys
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "") or os.environ.get("DEEPLSEEK_API_KEY", "")
 DEEPSEEK_URL = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.ai/v1/generate")
 
@@ -165,11 +144,9 @@ MODEL_PROVIDER_PRIMARY = os.environ.get("MODEL_PROVIDER_PRIMARY", "DEEPSEEK").up
 MODEL_PROVIDER_SECONDARY = os.environ.get("MODEL_PROVIDER_SECONDARY", "GROQ").upper()
 MODEL_PROVIDER_TERTIARY = os.environ.get("MODEL_PROVIDER_TERTIARY", "OPENAI").upper()
 
-# Local LLM settings
 LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "mosaicml/mpt-7b-instruct")
 LOCAL_LLM_MAX_TOKENS = int(os.environ.get("LOCAL_LLM_MAX_TOKENS", "2048"))
 
-# Other keys mapping
 ATTOM_API_KEY = os.environ.get("ATTOM_KEY", "") or os.environ.get("ATTOM_API_KEY", "")
 TWILIO_API_SID = os.environ.get("TWILIO_API_SID", "") or os.environ.get("TWILIO_SID", "")
 TWILIO_API_SECRET = os.environ.get("TWILIO_API_SECRET", "") or os.environ.get("TWILIO_AUTH", "")
@@ -179,37 +156,34 @@ FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN", "") or
 FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID", "")
 FACEBOOK_GRAPH_URL = os.environ.get("FACEBOOK_GRAPH_URL", "https://graph.facebook.com/v17.0")
 
-# Memory config
-VECTOR_DB = os.environ.get("VECTOR_DB", "")  # e.g., PINECONE, PGVECTOR, LOCAL
+VECTOR_DB = os.environ.get("VECTOR_DB", "")  # e.g., PINECONE or LOCAL
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "")
 PINECONE_ENV = os.environ.get("PINECONE_ENV", "")
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX", "britton-memory")
 
-# Autonomy guard
 AUTONOMOUS_MODE = os.environ.get("AUTONOMOUS_MODE", "false").lower() in ("1", "true", "yes")
 
-# Prompt loader
+# Optional prompt loader
 PROMPT_PATH = os.path.join("prompts", "britton_underwriter_master.py")
-LLM_PROMPT = None
+LLM_PROMPT: Optional[str] = None
 if os.path.exists(PROMPT_PATH):
     try:
         import importlib.util
         spec = importlib.util.spec_from_file_location("prompts.master", PROMPT_PATH)
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        spec.loader.exec_module(mod)  # type: ignore
         LLM_PROMPT = getattr(mod, "BRITTON_UNDERWRITER_PROMPT", None)
         logger.debug("Loaded LLM_PROMPT from prompts")
     except Exception:
-        LLM_PROMPT = None
+        logger.exception("Failed loading LLM_PROMPT (continuing)")
 
-# Sentry init (optional)
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 if SENTRY_DSN and SENTRY_AVAILABLE:
     try:
         sentry_sdk.init(SENTRY_DSN)
         logger.debug("Sentry initialized")
     except Exception:
-        logger.exception("Sentry init failed")
+        logger.exception("Sentry init failed (continuing)")
 
 # -----------------------
 # Utilities / evidence
@@ -221,17 +195,17 @@ def append_manifest(record: Dict[str, Any]) -> None:
     mf = os.path.join(EVIDENCE_DIR, "manifest.jsonl")
     try:
         with open(mf, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
-        logger.debug("Failed to append manifest entry", exc_info=True)
+        logger.exception("Failed to append manifest entry (continuing)")
 
 def _s3_upload(local_path: str, s3_bucket: str, s3_key: str, region: str = "us-east-1") -> bool:
     if not boto3:
-        logger.debug("boto3 missing, cannot upload to s3")
+        logger.debug("boto3 not available; skipping s3 upload")
         return False
     try:
-        s3 = boto3.client("s3", region_name=region)
-        s3.upload_file(local_path, s3_bucket, s3_key)
+        client = boto3.client("s3", region_name=region)
+        client.upload_file(local_path, s3_bucket, s3_key)
         return True
     except Exception:
         logger.exception("S3 upload failed")
@@ -240,37 +214,45 @@ def _s3_upload(local_path: str, s3_bucket: str, s3_key: str, region: str = "us-e
 def store_evidence_binary(source: str, raw_bytes: bytes, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     meta = meta or {}
     h = sha256_bytes(raw_bytes)
-    filename = f"{h}.bin"
-    local_path = os.path.join(EVIDENCE_DIR, filename)
+    fn = f"{h}.bin"
+    local_path = os.path.join(EVIDENCE_DIR, fn)
+    item = {
+        "id": h,
+        "source": source,
+        "sha256": h,
+        "size": len(raw_bytes),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "local_path": None,
+        "meta": meta
+    }
     try:
         with open(local_path, "wb") as f:
             f.write(raw_bytes)
+        item["local_path"] = local_path
     except Exception:
-        item = {"id": h, "source": source, "sha256": h, "size": len(raw_bytes), "timestamp": datetime.utcnow().isoformat() + "Z", "local_path": None, "meta": meta}
+        logger.exception("Failed writing evidence binary to disk; returning manifest with no local_path")
         append_manifest(item)
-        logger.exception("Failed to write evidence to disk")
         return item
 
-    item = {"id": h, "source": source, "sha256": h, "size": len(raw_bytes), "timestamp": datetime.utcnow().isoformat() + "Z", "local_path": local_path, "meta": meta}
     append_manifest(item)
 
     if USE_S3 and S3_BUCKET:
         try:
-            s3_key = f"evidence/{filename}"
+            s3_key = f"evidence/{fn}"
             ok = _s3_upload(local_path, S3_BUCKET, s3_key, region=S3_REGION)
             if ok:
                 item["s3_key"] = s3_key
         except Exception:
-            logger.exception("S3 upload attempt failed")
+            logger.exception("S3 upload attempt failed (continuing)")
 
     return item
 
 def store_evidence_json(source: str, data: Dict[str, Any], meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return store_evidence_binary(source, raw, meta)
 
 # -----------------------
-# Underwriter math
+# Underwriter math (preserved)
 # -----------------------
 def compute_britton_score(noi, price, dscr, equity_gap, prop_meta):
     try:
@@ -279,8 +261,8 @@ def compute_britton_score(noi, price, dscr, equity_gap, prop_meta):
         dscr_score = min(2.0, (dscr or 0.0)) / 2.0
         gap_score = 1.0 if equity_gap >= 0 else max(0.0, 1.0 + (equity_gap / price if price > 0 else -1.0))
         tags = prop_meta.get("tags") if isinstance(prop_meta.get("tags"), list) else []
-        seller_score = 1.2 if any(t.lower() in ("motivated", "probate", "divorce", "pre-foreclosure", "tax-lien") for t in tags) else 1.0
-        title_risk = 0.9 if any(t.lower() in ("liens", "clouded-title", "judgment", "bankruptcy") for t in tags) else 1.0
+        seller_score = 1.2 if any(str(t).lower() in ("motivated", "probate", "divorce", "pre-foreclosure", "tax-lien") for t in tags) else 1.0
+        title_risk = 0.9 if any(str(t).lower() in ("liens", "clouded-title", "judgment", "bankruptcy") for t in tags) else 1.0
         raw = (cashflow_score * 0.35 + dscr_score * 0.35 + gap_score * 0.2) * 100.0
         raw = raw * seller_score * title_risk
         return max(0.0, min(100.0, raw))
@@ -374,7 +356,10 @@ def simulate_refund_waterfall(price: float, existing_debt: float, investor_equit
 # Verify pipeline (stubs)
 # -----------------------
 def verify_listing_pipeline(listing: Dict[str, Any], attempts: int = 5, require_checks: int = 5) -> Dict[str, Any]:
-    manifest = {"id": str(uuid.uuid4()), "created": datetime.utcnow().isoformat() + "Z", "requested_attempts": attempts, "required_checks": require_checks, "checks": [], "evidence": []}
+    manifest = {
+        "id": str(uuid.uuid4()), "created": datetime.utcnow().isoformat() + "Z",
+        "requested_attempts": attempts, "required_checks": require_checks, "checks": [], "evidence": []
+    }
     passed = 0
     check_fns = [
         check_primary_listing_active, check_county_record_match, check_tax_lien_status,
@@ -396,7 +381,7 @@ def verify_listing_pipeline(listing: Dict[str, Any], attempts: int = 5, require_
                 passed += 1
             i += 1
         except Exception as e:
-            manifest["checks"].append({"check": fn.__name__, "passed": False, "error": str(e)})
+            manifest["checks"].append({"check": getattr(fn, "__name__", str(fn)), "passed": False, "error": str(e)})
             logger.exception("verify check failed")
             i += 1
     confidence = min(1.0, passed / float(require_checks)) if require_checks > 0 else 0.0
@@ -404,13 +389,14 @@ def verify_listing_pipeline(listing: Dict[str, Any], attempts: int = 5, require_
     manifest.update({"passed_checks": passed, "confidence": confidence, "label": label})
     return manifest
 
+# Individual verify stubs (preserve behavior)
 def check_primary_listing_active(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "primary_listing_active", "passed": False, "notes": "", "evidence_items": []}
     url = listing.get("source_url") or listing.get("url")
     if not url:
         out["notes"] = "no source_url"
         return out
-    raw = json.dumps({"url": url}).encode("utf-8")
+    raw = json.dumps({"url": url}, ensure_ascii=False).encode("utf-8")
     ev = store_evidence_binary("primary_listing_url", raw, {"url": url})
     out["evidence_items"].append(ev)
     out["passed"] = True
@@ -424,7 +410,7 @@ def check_county_record_match(listing: Dict[str, Any]) -> Dict[str, Any]:
         out["notes"] = "no address"
         return out
     payload = {"address": address, "assessed_value": listing.get("assessed_value")}
-    raw = json.dumps(payload).encode("utf-8")
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     ev = store_evidence_binary("county_assessor_stub", raw, {"address": address})
     out["evidence_items"].append(ev)
     out["passed"] = True
@@ -434,7 +420,7 @@ def check_tax_lien_status(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "tax_lien", "passed": False, "notes": "", "evidence_items": []}
     tags = listing.get("tags", [])
     has_lien = any("tax-lien" in str(t).lower() for t in tags)
-    raw = json.dumps({"tax_lien_found": has_lien}).encode("utf-8")
+    raw = json.dumps({"tax_lien_found": has_lien}, ensure_ascii=False).encode("utf-8")
     ev = store_evidence_binary("tax_lien_stub", raw, {})
     out["evidence_items"].append(ev)
     out["passed"] = not has_lien
@@ -442,7 +428,7 @@ def check_tax_lien_status(listing: Dict[str, Any]) -> Dict[str, Any]:
 
 def check_contact_validation(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "contact_validation", "passed": False, "notes": "", "evidence_items": []}
-    contact = listing.get("contact", {})
+    contact = listing.get("contact", {}) or {}
     phone = contact.get("phone") or listing.get("phone")
     email = contact.get("email") or listing.get("email")
     valid_phone = False
@@ -451,12 +437,12 @@ def check_contact_validation(listing: Dict[str, Any]) -> Dict[str, Any]:
         import re
         digits = re.sub(r'\D', '', str(phone))
         valid_phone = len(digits) >= 10
-        ev = store_evidence_binary("contact_phone", json.dumps({"phone": phone, "digits": digits}).encode("utf-8"), {"phone": phone})
+        ev = store_evidence_binary("contact_phone", json.dumps({"phone": phone, "digits": digits}, ensure_ascii=False).encode("utf-8"), {"phone": phone})
         out["evidence_items"].append(ev)
     if email:
         import re
         valid_email = bool(re.match(r"[^@]+@[^@]+\.[^@]+", email))
-        ev = store_evidence_binary("contact_email", json.dumps({"email": email}).encode("utf-8"), {"email": email})
+        ev = store_evidence_binary("contact_email", json.dumps({"email": email}, ensure_ascii=False).encode("utf-8"), {"email": email})
         out["evidence_items"].append(ev)
     out["passed"] = valid_phone or valid_email
     out["notes"] = f"phone_valid={valid_phone},email_valid={valid_email}"
@@ -464,53 +450,55 @@ def check_contact_validation(listing: Dict[str, Any]) -> Dict[str, Any]:
 
 def check_independent_third_source(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "independent_third_source", "passed": True, "notes": "stub", "evidence_items": []}
-    ev = store_evidence_binary("third_source_stub", json.dumps({"listing": listing}).encode("utf-8"), {})
+    ev = store_evidence_binary("third_source_stub", json.dumps({"listing": listing}, ensure_ascii=False).encode("utf-8"), {})
     out["evidence_items"].append(ev)
     return out
 
 def check_title_snapshot(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "title_snapshot", "passed": True, "notes": "stub", "evidence_items": []}
-    ev = store_evidence_binary("title_stub", json.dumps({"address": listing.get("address")}).encode("utf-8"), {})
+    ev = store_evidence_binary("title_stub", json.dumps({"address": listing.get("address")}, ensure_ascii=False).encode("utf-8"), {})
     out["evidence_items"].append(ev)
     return out
 
 def check_saved_search_crossref(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "saved_search_crossref", "passed": True, "notes": "stub", "evidence_items": []}
-    ev = store_evidence_binary("crossref_stub", json.dumps({"listing": listing}).encode("utf-8"), {})
+    ev = store_evidence_binary("crossref_stub", json.dumps({"listing": listing}, ensure_ascii=False).encode("utf-8"), {})
     out["evidence_items"].append(ev)
     return out
 
 def check_agent_mls_validation(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "agent_mls_validation", "passed": True, "notes": "stub", "evidence_items": []}
-    ev = store_evidence_binary("agent_mls_stub", json.dumps({"agent_mls": listing.get("agent_mls_id")}).encode("utf-8"), {})
+    ev = store_evidence_binary("agent_mls_stub", json.dumps({"agent_mls": listing.get("agent_mls_id")}, ensure_ascii=False).encode("utf-8"), {})
     out["evidence_items"].append(ev)
     return out
 
 def check_geocode_and_parcel(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "geocode_parcel", "passed": True, "notes": "stub", "evidence_items": []}
-    ev = store_evidence_binary("geocode_stub", json.dumps({"address": listing.get("address")}).encode("utf-8"), {})
+    ev = store_evidence_binary("geocode_stub", json.dumps({"address": listing.get("address")}, ensure_ascii=False).encode("utf-8"), {})
     out["evidence_items"].append(ev)
     return out
 
 def check_photo_and_image_for_condition(listing: Dict[str, Any]) -> Dict[str, Any]:
     out = {"check": "photo_condition", "passed": True, "notes": "stub", "evidence_items": []}
-    ev = store_evidence_binary("photo_stub", json.dumps({"photos": "stub"}).encode("utf-8"), {})
+    ev = store_evidence_binary("photo_stub", json.dumps({"photos": "stub"}, ensure_ascii=False).encode("utf-8"), {})
     out["evidence_items"].append(ev)
     return out
 
 # -----------------------
 # LLM provider helpers
 # -----------------------
-def _post_json_with_retry(url: str, headers: Dict[str, str], payload: Dict[str, Any], retries: int = 5, backoff_base: float = 0.5, timeout: int = 30) -> Tuple[bool, Any]:
-    """
-    Unified HTTP POST wrapper tries requests then httpx (best-effort).
-    """
+def _post_json_with_retry(url: str, headers: Optional[Dict[str, str]], payload: Dict[str, Any], retries: int = 5, backoff_base: float = 0.5, timeout: int = 30) -> Tuple[bool, Any]:
+    headers = dict(headers or {})
+    headers.setdefault("Content-Type", "application/json")
+    headers.setdefault("Accept", "application/json")
+    headers.setdefault("User-Agent", "BrittonMethod/1.0")
+
     last_err = None
     for attempt in range(retries):
         try:
             if requests:
                 resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-                status = resp.status_code
+                status = getattr(resp, "status_code", None)
                 if status in (200, 201):
                     try:
                         return True, resp.json()
@@ -552,8 +540,8 @@ def _post_json_with_retry(url: str, headers: Dict[str, str], payload: Dict[str, 
 def _call_deepseek(prompt: str, model: str = "deepseek-v3.2", max_tokens: int = 2000) -> Dict[str, Any]:
     if not DEEPSEEK_KEY:
         return {"ok": False, "error": "missing_deepseek_key"}
-    url = os.environ.get("DEEPSEEK_API_URL", DEEPSEEK_URL)
-    headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}", "Content-Type": "application/json"}
+    url = DEEPSEEK_URL
+    headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}"}
     payload = {"model": model, "input": prompt, "max_tokens": max_tokens}
     ok, res = _post_json_with_retry(url, headers, payload)
     if not ok:
@@ -577,8 +565,8 @@ def _call_deepseek(prompt: str, model: str = "deepseek-v3.2", max_tokens: int = 
 def _call_groq(prompt: str, model: str = "llama-3.3-70b", max_tokens: int = 2000) -> Dict[str, Any]:
     if not GROQ_KEY:
         return {"ok": False, "error": "missing_groq_key"}
-    url = os.environ.get("GROQ_API_URL", GROQ_URL)
-    headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+    url = GROQ_URL
+    headers = {"Authorization": f"Bearer {GROQ_KEY}"}
     payload = {"model": model, "prompt": prompt, "max_tokens": max_tokens}
     ok, res = _post_json_with_retry(url, headers, payload)
     if not ok:
@@ -608,32 +596,28 @@ def _call_openai_api(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 
                 client = OpenAIClient(api_key=OPENAI_KEY)
                 try:
                     resp = client.responses.create(model=model, input=prompt, max_tokens=max_tokens)
-                    text = ""
-                    try:
-                        if hasattr(resp, "output_text"):
-                            text = getattr(resp, "output_text")
+                    text = getattr(resp, "output_text", None) or (resp.get("output_text") if isinstance(resp, dict) else None)
+                    if not text:
+                        if isinstance(resp, dict):
+                            text = resp.get("output_text") or (resp.get("output") and resp["output"][0].get("content")) or ""
                         else:
-                            j = resp
-                            text = j.get("output_text") or (j.get("output") and j["output"][0].get("content")) or ""
-                    except Exception:
-                        text = str(resp)
+                            text = str(resp)
                     return {"ok": True, "response": text, "raw": resp}
                 except Exception:
                     try:
                         resp = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], max_tokens=max_tokens, temperature=temperature)
-                        text = ""
                         if isinstance(resp, dict):
                             choices = resp.get("choices") or []
                             if choices:
                                 first = choices[0]
                                 msg = first.get("message") or {}
                                 text = msg.get("content") or first.get("text") or ""
-                        return {"ok": True, "response": text, "raw": resp}
+                                return {"ok": True, "response": text, "raw": resp}
+                        return {"ok": True, "response": str(resp), "raw": resp}
                     except Exception:
                         logger.exception("New OpenAI client chat fallback failed")
-                        pass
             except Exception:
-                logger.debug("New OpenAI client instantiation failed", exc_info=True)
+                logger.debug("Failed instantiating new OpenAI client", exc_info=True)
 
         if OPENAI_LEGACY and _legacy_openai is not None:
             try:
@@ -648,31 +632,23 @@ def _call_openai_api(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 
                             msg = first.get("message") or {}
                             text = msg.get("content") or first.get("text") or ""
                         else:
-                            try:
-                                msg = getattr(first, "message", None)
-                                if msg and hasattr(msg, "get"):
-                                    text = msg.get("content") or ""
-                                else:
-                                    text = getattr(first, "text", "") or ""
-                            except Exception:
-                                text = str(first)
+                            text = str(first)
                     else:
                         text = str(resp)
                     return {"ok": True, "response": text, "raw": resp}
                 if hasattr(_legacy_openai, "Completion") and hasattr(_legacy_openai.Completion, "create"):
                     resp = _legacy_openai.Completion.create(engine=model, prompt=prompt, max_tokens=max_tokens, temperature=temperature)
-                    text = ""
                     if isinstance(resp, dict):
                         choices = resp.get("choices") or []
                         if choices:
-                            text = choices[0].get("text") or ""
-                    return {"ok": True, "response": text, "raw": resp}
-            except Exception as e:
+                            return {"ok": True, "response": choices[0].get("text") or "", "raw": resp}
+                    return {"ok": True, "response": str(resp), "raw": resp}
+            except Exception:
                 logger.exception("legacy openai call failed")
-                return {"ok": False, "error": "openai_call_exception", "detail": str(e)}
-    except Exception as e:
+                return {"ok": False, "error": "openai_call_exception"}
+    except Exception:
         logger.exception("openai_client_error")
-        return {"ok": False, "error": "openai_client_error", "detail": str(e)}
+        return {"ok": False, "error": "openai_client_error"}
     return {"ok": False, "error": "no_openai_client_available"}
 
 def _call_gemini(prompt: str, model: str = "gemini-2.5-pro", max_tokens: int = 1024) -> Dict[str, Any]:
@@ -687,7 +663,7 @@ def _call_gemini(prompt: str, model: str = "gemini-2.5-pro", max_tokens: int = 1
     text = ""
     try:
         if isinstance(res, dict):
-            text = res.get("candidates", [{}])[0].get("content") or res.get("output_text") or ""
+            text = (res.get("candidates") or [{}])[0].get("content") or res.get("output_text") or ""
         elif isinstance(res, str):
             text = res
     except Exception:
@@ -707,16 +683,16 @@ def _generate_local(prompt: str, max_tokens: int = 1024) -> Dict[str, Any]:
         out = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False)
         text = tokenizer.decode(out[0], skip_special_tokens=True)
         return {"ok": True, "response": text}
-    except Exception as e:
+    except Exception:
         logger.exception("local model generation failed")
-        return {"ok": False, "error": "local_model_failed", "detail": str(e)}
+        return {"ok": False, "error": "local_model_failed"}
 
 # -----------------------
-# Provider chain & public wrapper
+# Provider chain + public wrapper
 # -----------------------
 def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, providers: Optional[Tuple[str, ...]] = None) -> Dict[str, Any]:
     chain = list(providers) if providers else [MODEL_PROVIDER_PRIMARY, MODEL_PROVIDER_SECONDARY, MODEL_PROVIDER_TERTIARY]
-    errors = []
+    errors: List[Dict[str, Any]] = []
     logger.debug("Provider chain start: %s", chain)
     for provider in chain:
         provider = (provider or "").upper()
@@ -744,7 +720,7 @@ def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, pr
             try:
                 store_evidence_json("provider_success", {"provider": provider, "prompt_hash": sha256_bytes(prompt.encode("utf-8"))}, {"provider": provider})
             except Exception:
-                pass
+                logger.debug("Failed to store provider success evidence (continuing)")
             return {"ok": True, "response": res.get("response"), "provider": provider, "raw": res.get("raw")}
         else:
             errors.append({"provider": provider, "result": res})
@@ -752,9 +728,9 @@ def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, pr
             try:
                 store_evidence_json("provider_failure", {"provider": provider, "error": res}, {"provider": provider})
             except Exception:
-                pass
+                logger.debug("Failed to store provider failure evidence (continuing)")
 
-    # Try local generation finally
+    # Try local generation finally (if not already tried)
     try:
         local = _generate_local(prompt, max_tokens=min(max_tokens, LOCAL_LLM_MAX_TOKENS))
         if local.get("ok") and local.get("response"):
@@ -764,13 +740,13 @@ def provider_generate_text_with_fallback(prompt: str, max_tokens: int = 2000, pr
         errors.append({"provider": "LOCAL", "error": str(e)})
         logger.exception("Local generation failed during fallback chain")
 
-    # Deterministic fallback guaranteed
+    # Deterministic fallback (guaranteed)
     try:
         text = _deterministic_fallback_text(prompt)
         return {"ok": True, "response": text, "provider": "DETERMINISTIC_FALLBACK", "errors": errors}
-    except Exception as e:
+    except Exception:
         logger.exception("Deterministic fallback failed")
-        return {"ok": False, "error": "no_provider_succeeded", "errors": errors, "detail": str(e)}
+        return {"ok": False, "error": "no_provider_succeeded", "errors": errors}
 
 # Compatibility shim used by main.py
 def get_openai_response(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 1024, temperature: float = 0.0) -> Dict[str, Any]:
@@ -780,7 +756,6 @@ def get_openai_response(prompt: str, model: str = "gpt-4o-mini", max_tokens: int
             return out
     except Exception:
         logger.exception("provider_generate_text_with_fallback failed in shim")
-    # try direct openai call
     try:
         o = _call_openai_api(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
         if o.get("ok"):
@@ -814,7 +789,7 @@ def _deterministic_fallback_text(prompt: str, min_words: int = 200) -> str:
 def generate_long_loi_text(prop: Dict[str, Any], min_words: int = 2000, max_words: int = 2500) -> str:
     safe_prop = {k: v for k, v in prop.items() if k not in ("britton_score", "confidence", "internal_notes", "evidence_manifest")}
     prompt_instructions = ((LLM_PROMPT + "\n\n") if LLM_PROMPT else "") + (
-        f"You are an expert real estate acquisitions underwriter. Create a professional Letter of Intent (LOI) between {min_words} and {max_words} words for the following property data: {json.dumps(safe_prop)}. "
+        f"You are an expert real estate acquisitions underwriter. Create a professional Letter of Intent (LOI) between {min_words} and {max_words} words for the following property data: {json.dumps(safe_prop, ensure_ascii=False)}. "
         "Do NOT include internal scores (britton_score/confidence) nor secret keys. Render the LOI with sections: Executive Summary, Offer Terms (3 options), Financing Structure, Contingencies, Timeline, Contact Info, and Signatures. Use professional tone and clear section headings."
     )
 
@@ -829,7 +804,7 @@ def generate_long_loi_text(prop: Dict[str, Any], min_words: int = 2000, max_word
     return _deterministic_fallback_text(prompt_instructions, min_words=min_words)
 
 # -----------------------
-# Meta / Facebook helper (guarded)
+# Meta (Facebook) helper (guarded)
 # -----------------------
 def meta_post_text(message: str, page_access_token: Optional[str] = None, page_id: Optional[str] = None) -> Dict[str, Any]:
     page_access_token = page_access_token or FACEBOOK_PAGE_ACCESS_TOKEN
@@ -839,8 +814,6 @@ def meta_post_text(message: str, page_access_token: Optional[str] = None, page_i
         return {"ok": False, "error": "missing_facebook_credentials"}
 
     payload = {"message": message, "access_token": page_access_token}
-
-    # AUTONOMOUS guard
     if not AUTONOMOUS_MODE:
         item = store_evidence_json("meta_post_draft", {"page_id": page_id, "message": message}, {"queued": True})
         return {"ok": True, "status": "draft_saved", "evidence": item}
@@ -882,12 +855,11 @@ def twilio_send_sms(to_number: str, body: str, from_number: Optional[str] = None
         return {"ok": False, "error": str(e), "evidence": ev}
 
 # -----------------------
-# Memory store (pinecone/sente/local)
+# Memory store (pinecone / sentence-transformers / local JSONL)
 # -----------------------
 MEMORY_FILE = os.path.join(EVIDENCE_DIR, "memory.jsonl")
-
-# init pinecone if configured
 pindex = None
+
 if VECTOR_DB.upper() == "PINECONE" and PINECONE_API_KEY and PINECONE_AVAILABLE:
     try:
         pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENV)
@@ -905,10 +877,10 @@ if SENTE_AVAILABLE:
         _sente_model = SentenceTransformer(os.environ.get("SENTE_MODEL", "all-MiniLM-L6-v2"))
     except Exception:
         _sente_model = None
-        logger.exception("sentence model load failed")
+        logger.exception("sentence-transformer model init failed")
 
 def _embed_text(text: str) -> List[float]:
-    # 1) OpenAI embeddings via legacy client
+    # 1) OpenAI legacy embeddings
     if OPENAI_KEY and OPENAI_LEGACY and _legacy_openai:
         try:
             _legacy_openai.api_key = OPENAI_KEY
@@ -917,15 +889,15 @@ def _embed_text(text: str) -> List[float]:
                 vec = resp["data"][0]["embedding"]
                 return vec
         except Exception:
-            logger.exception("OpenAI embedding failed")
+            logger.exception("OpenAI embedding failed; falling back")
     # 2) sentence-transformers
     if _sente_model:
         try:
             vec = _sente_model.encode(text)
             return vec.tolist() if hasattr(vec, "tolist") else list(map(float, vec))
         except Exception:
-            logger.exception("sentence-transformer embedding failed")
-    # 3) hashed pseudo-vector fallback
+            logger.exception("sentence-transformer embedding failed; falling back")
+    # 3) deterministic hashed pseudo-vector fallback
     h = hashlib.sha256(text.encode("utf-8")).digest()
     vec = [float(b) for b in h[:64]]
     return vec
@@ -941,18 +913,18 @@ def memory_upsert(id: str, text: str, meta: Optional[Dict[str, Any]] = None) -> 
                 pindex.upsert([(id, vec, meta)])
                 store_evidence_json("memory_upsert_pinecone", {"id": id, "meta": meta}, {"vec_len": len(vec)})
             except Exception:
-                logger.exception("pinecone upsert failed")
+                logger.exception("pinecone upsert failed (continuing)")
     except Exception:
-        logger.exception("embedding failed during upsert")
+        logger.exception("embedding failed during memory_upsert (continuing)")
     try:
         with open(MEMORY_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + "\n")
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
-        logger.exception("writing to memory file failed")
+        logger.exception("Failed writing memory file (continuing)")
     return rec
 
 def _load_memory_local() -> List[Dict[str, Any]]:
-    out = []
+    out: List[Dict[str, Any]] = []
     try:
         if os.path.exists(MEMORY_FILE):
             with open(MEMORY_FILE, "r", encoding="utf-8") as f:
@@ -968,9 +940,9 @@ def _load_memory_local() -> List[Dict[str, Any]]:
 def _cosine_sim(a: List[float], b: List[float]) -> float:
     try:
         import math
-        dot = sum(x*y for x,y in zip(a,b))
-        na = math.sqrt(sum(x*x for x in a))
-        nb = math.sqrt(sum(x*x for x in b))
+        dot = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(x * x for x in b))
         if na == 0 or nb == 0:
             return 0.0
         return dot / (na * nb)
@@ -978,7 +950,7 @@ def _cosine_sim(a: List[float], b: List[float]) -> float:
         return 0.0
 
 def memory_query(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-    results = []
+    results: List[Dict[str, Any]] = []
     try:
         qvec = _embed_text(query)
         if pindex:
@@ -988,7 +960,7 @@ def memory_query(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
                     results.append({"id": m.get("id"), "score": m.get("score"), "meta": m.get("metadata")})
                 return results
             except Exception:
-                logger.exception("pinecone query failed")
+                logger.exception("pinecone query failed; falling back to local memory")
         mem = _load_memory_local()
         scored = []
         for r in mem:
@@ -1005,8 +977,8 @@ def memory_query(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
             results.append(rcopy)
         return results
     except Exception:
-        logger.exception("memory_query failed")
-    # substring fallback
+        logger.exception("memory_query failed (falling back to substring match)")
+
     mem = _load_memory_local()
     scored = []
     for r in mem:
@@ -1022,7 +994,7 @@ def memory_query(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
 # Diagnostics
 # -----------------------
 def diagnostics_report() -> Dict[str, Any]:
-    report = {
+    return {
         "time": datetime.utcnow().isoformat() + "Z",
         "components": {
             "requests": bool(requests),
@@ -1053,20 +1025,30 @@ def diagnostics_report() -> Dict[str, Any]:
             "VECTOR_DB": VECTOR_DB or "LOCAL"
         }
     }
-    return report
 
 # -----------------------
-# CLI helpers for quick local tests
+# CLI helpers
 # -----------------------
 def _selftest_print():
     print(json.dumps(diagnostics_report(), indent=2))
 
 def diagnostics_cli_test_loi():
-    sample_prop = {"address": "123 Test St", "price": 500000, "gpr": 60000, "tags":["motivated"]}
+    sample_prop = {"address": "123 Test St", "price": 500000, "gpr": 60000, "tags": ["motivated"]}
     loi = generate_long_loi_text(sample_prop, min_words=200, max_words=400)
     ev = store_evidence_json("sample_loi", {"loi_preview": loi[:200]}, {"address": sample_prop.get("address")})
-    print("LOI preview:", loi[:400])
-    print("Evidence:", ev)
+    print("LOI preview (first 400 chars):\n", loi[:400])
+    print("Evidence item:", ev)
+
+# Exports used by main.py (ensure backwards compatibility)
+__all__ = [
+    "underwriter_deterministic", "monte_carlo_simulation", "simulate_refund_waterfall",
+    "verify_listing_pipeline", "store_evidence_binary", "store_evidence_json",
+    "generate_long_loi_text", "provider_generate_text_with_fallback", "get_openai_response",
+    "deterministic_fallback", "diagnostics_report", "memory_upsert", "memory_query"
+]
+
+# deterministic fallback alias (for compatibility)
+deterministic_fallback = _deterministic_fallback_text
 
 if __name__ == "__main__":
     import sys
@@ -1077,5 +1059,3 @@ if __name__ == "__main__":
         diagnostics_cli_test_loi()
     else:
         print("Usage: app_core.py [diag|test-loi]")
-
-# End of file

@@ -1,1 +1,6 @@
-# (Paste full production-ready .render.yaml here)
+services:
+  - type: web
+    name: BrittonMethod-API
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn main:app -c gunicorn_conf.py"

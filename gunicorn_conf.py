@@ -1,1 +1,4 @@
-# (Paste full production-ready gunicorn_conf.py here)
+# Gunicorn production configuration for BrittonMethod-auto
+bind = "0.0.0.0:8000"
+workers = 4
+timeout = 120
