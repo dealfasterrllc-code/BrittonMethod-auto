@@ -4,13 +4,12 @@
 # Description: Web service using Docker, entrypoint, Gunicorn, background worker queue, and evidence persistence
 
 services:
+  # Main web service (Flask + Gunicorn)
   - type: web
     name: BrittonMethod-API
     env: docker
     plan: starter
-    # Path to your Dockerfile
     dockerfilePath: Dockerfile
-    # Port Render should bind
     envVars:
       - key: PORT
         value: "10000"
@@ -48,22 +47,17 @@ services:
         value: "OPENAI"
       - key: AUTONOMOUS_MODE
         value: "false"
-    # Optional build environment variables / hooks
     buildCommand: "echo 'Building BrittonMethod Docker image...'"
-    # Use entrypoint.sh so the container can perform init tasks before launching Gunicorn
-    startCommand: "./entrypoint.sh"
+    startCommand: "./entrypoint.sh" # Entrypoint handles Gunicorn start & prelaunch tasks
     healthCheckPath: "/health"
     healthCheckInterval: 30
     healthCheckTimeout: 5
     healthCheckRetries: 3
-    # Persistent volume for evidence storage
     disk:
       mountPath: /tmp/britton_evidence
       sizeGB: 1
-    # Auto-deploy from GitHub / GitLab repository
     autoDeploy: true
     branch: main
-    # Optional secrets management (Render will link these to the service)
     secrets:
       - BRITTON_API_KEY
       - OPENAI_API_KEY
@@ -73,7 +67,7 @@ services:
       - REDIS_URL
       - DATABASE_URL
 
-  # Optional background worker (if you want async tasks isolated)
+  # Background worker service (processes queued jobs)
   - type: worker
     name: BrittonMethod-Worker
     env: docker
@@ -81,7 +75,7 @@ services:
     dockerfilePath: Dockerfile
     envVars:
       - key: PORT
-        value: "10001" # Not used for worker, just placeholder
+        value: "10001" # Placeholder; not used for worker
       - key: BRITTON_API_KEY
         fromDatabase: true
       - key: OPENAI_API_KEY
@@ -116,8 +110,7 @@ services:
         value: "OPENAI"
       - key: AUTONOMOUS_MODE
         value: "false"
-    # Worker start command runs the in-process worker thread inside main.py
-    startCommand: "python main.py"
+    startCommand: "python main.py" # Runs background worker thread in main.py
     disk:
       mountPath: /tmp/britton_evidence
       sizeGB: 1
