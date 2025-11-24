@@ -1,0 +1,18 @@
+# === Transformers / GPU & advanced ML ===
+torch==2.2.0+cu118       # GPU version; match to CUDA on your server
+transformers==4.35.0
+accelerate==0.25.0
+
+# === Optional embeddings & similarity ===
+sentence-transformers==2.2.2
+xgboost==1.7.5
+
+# === Heavy analytics / reporting ===
+matplotlib==3.6.3
+pandas==1.5.3
+numpy==1.23.5
+
+# === Optional cloud / storage integrations ===
+boto3==1.26.152
+s3fs==2023.12.1
+fsspec==2023.12.1
