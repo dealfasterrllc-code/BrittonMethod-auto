@@ -14,10 +14,10 @@ _requested_workers = int(os.environ.get("GUNICORN_WORKERS", DEFAULT_WORKERS))
 MAX_WORKERS_CAP = int(os.environ.get("MAX_WORKERS_CAP", 8))
 workers = min(_requested_workers, MAX_WORKERS_CAP)
 
-# Worker class: 'gthread' is a safe general-purpose choice
+# Worker class: 'gthread' is a safe general-purpose choice for Docker
 worker_class = os.environ.get("GUNICORN_WORKER_CLASS", "gthread")
 
-# Threads per worker (for gthread); fallback to 2 if not set
+# Threads per worker (for gthread)
 threads = int(os.environ.get("GUNICORN_THREADS", os.environ.get("GUNICORN_THREAD_COUNT", 2)))
 
 # -----------------------
@@ -36,7 +36,7 @@ max_requests_jitter = int(os.environ.get("GUNICORN_MAX_REQUESTS_JITTER", 100))
 # -----------------------
 # Bind / reload / logging
 # -----------------------
-bind = "0.0.0.0:" + os.environ.get("PORT", "8000")
+bind = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
 reload = os.environ.get("GUNICORN_RELOAD", "false").lower() in ("1", "true", "yes")
 
 accesslog = os.environ.get("GUNICORN_ACCESS_LOG", "-")
@@ -81,3 +81,10 @@ def worker_int(worker):
 
 def worker_abort(worker):
     worker.log.warning("Worker %s aborted", worker.pid)
+
+# -----------------------
+# Optional: enforce sane defaults in containerized environments
+# -----------------------
+# Ensure at least one worker
+if workers < 1:
+    workers = 1
