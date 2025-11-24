@@ -4,6 +4,8 @@ set -euo pipefail
 ###############################################################################
 # BrittonMethod-auto — entrypoint.sh
 # Production-ready startup script for Render (or any containerized Python service)
+# Handles virtualenv activation, Gunicorn startup, Playwright install, Alembic
+# migrations, TCP dependency checks, logging, and safe defaults for memory.
 ###############################################################################
 
 # --- CONFIG (can be overridden by env / Render) ---
@@ -29,7 +31,7 @@ else
     echo "[WARN] No virtualenv found at ${VENV_PATH} — continuing without activation"
 fi
 
-# --- ENFORCE caps / sane defaults ---
+# --- ENFORCE WORKER CAPS ---
 if [ "${GUNICORN_WORKERS}" -gt "${MAX_WORKERS_CAP}" ]; then
     echo "[WARN] Worker count ${GUNICORN_WORKERS} exceeds cap ${MAX_WORKERS_CAP}, reducing"
     GUNICORN_WORKERS="${MAX_WORKERS_CAP}"
@@ -56,8 +58,8 @@ wait_for_tcp() {
 }
 
 if command -v nc >/dev/null 2>&1; then
-    [ -n "${REDIS_URL:-}" ] && REDIS_HOSTPORT=$(echo "${REDIS_URL}" | sed -E 's#^redis://([^/@]+@)?([^:]+:[0-9]+).*#\2#; t; s#.*##') && [ -n "$REDIS_HOSTPORT" ] && wait_for_tcp "$REDIS_HOSTPORT" 15 || true
-    [ -n "${DATABASE_URL:-}" ] && DB_HOSTPORT=$(echo "${DATABASE_URL}" | sed -E 's#^.*@([^:/]+:[0-9]+).*#\1#; t; s#.*##') && [ -n "$DB_HOSTPORT" ] && wait_for_tcp "$DB_HOSTPORT" 20 || true
+    [ -n "${REDIS_URL:-}" ] && REDIS_HOSTPORT=$(echo "${REDIS_URL}" | sed -E 's#^redis://([^/@]+@)?([^:]+:[0-9]+).*#\2#') && [ -n "$REDIS_HOSTPORT" ] && wait_for_tcp "$REDIS_HOSTPORT" 15 || true
+    [ -n "${DATABASE_URL:-}" ] && DB_HOSTPORT=$(echo "${DATABASE_URL}" | sed -E 's#^.*@([^:/]+:[0-9]+).*#\1#') && [ -n "$DB_HOSTPORT" ] && wait_for_tcp "$DB_HOSTPORT" 20 || true
 else
     echo "[WARN] nc not available; skipping TCP wait checks"
 fi
@@ -78,6 +80,7 @@ if [ "${PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD}" = "1" ]; then
 elif [ "${INSTALL_PLAYWRIGHT}" = "1" ]; then
     if python -c "import playwright" >/dev/null 2>&1; then
         echo "[INFO] Playwright detected — attempting browser install..."
+        # Non-root safe browser install
         if ! python -m playwright install chromium; then
             echo "[WARN] Playwright browser install failed; continuing without browsers"
         fi
