@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+<<<<<<< HEAD
 """
 main.py — Production-ready Flask entry for BrittonMethod-auto
 World-class, revolutionary version.
@@ -317,3 +318,6 @@ if __name__ == "__main__":
         bool(deterministic_fallback),
     )
     app.run(host="0.0.0.0", port=port, threaded=True)
+=======
+# (Paste the full production-ready main.py content here from earlier)
+>>>>>>> 5097eee (Full upgrade: Python 3.12.2, production-ready main.py, entrypoint.sh, gunicorn_conf.py, .render.yaml)

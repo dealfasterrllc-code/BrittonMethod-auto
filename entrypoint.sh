@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+<<<<<<< HEAD
 ###############################################################################
 # BrittonMethod-auto — entrypoint.sh
 # World-class production-ready startup script
@@ -92,3 +93,13 @@ GUNICORN_CMD="gunicorn main:app --workers ${GUNICORN_WORKERS} --threads ${GUNICO
 
 echo "[INFO] Starting Gunicorn server..."
 exec $GUNICORN_CMD
+=======
+echo "[INFO] Entrypoint starting..."
+# Optional: Run database migrations or init tasks here
+if [[ -f "migrate.sh" ]]; then
+  ./migrate.sh
+fi
+
+echo "[INFO] Launching Gunicorn..."
+exec gunicorn -c gunicorn_conf.py main:app
+>>>>>>> 5097eee (Full upgrade: Python 3.12.2, production-ready main.py, entrypoint.sh, gunicorn_conf.py, .render.yaml)

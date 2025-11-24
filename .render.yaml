@@ -48,7 +48,11 @@ services:
       - key: AUTONOMOUS_MODE
         value: "false"
     buildCommand: "echo 'Building BrittonMethod Docker image...'"
+<<<<<<< HEAD
     startCommand: "./entrypoint.sh" # Entrypoint handles Gunicorn start & prelaunch tasks
+=======
+    startCommand: "./entrypoint.sh"
+>>>>>>> 5097eee (Full upgrade: Python 3.12.2, production-ready main.py, entrypoint.sh, gunicorn_conf.py, .render.yaml)
     healthCheckPath: "/health"
     healthCheckInterval: 30
     healthCheckTimeout: 5
@@ -67,7 +71,10 @@ services:
       - REDIS_URL
       - DATABASE_URL
 
+<<<<<<< HEAD
   # Background worker service (processes queued jobs)
+=======
+>>>>>>> 5097eee (Full upgrade: Python 3.12.2, production-ready main.py, entrypoint.sh, gunicorn_conf.py, .render.yaml)
   - type: worker
     name: BrittonMethod-Worker
     env: docker
@@ -75,7 +82,11 @@ services:
     dockerfilePath: Dockerfile
     envVars:
       - key: PORT
+<<<<<<< HEAD
         value: "10001" # Placeholder; not used for worker
+=======
+        value: "10001"
+>>>>>>> 5097eee (Full upgrade: Python 3.12.2, production-ready main.py, entrypoint.sh, gunicorn_conf.py, .render.yaml)
       - key: BRITTON_API_KEY
         fromDatabase: true
       - key: OPENAI_API_KEY
@@ -110,7 +121,11 @@ services:
         value: "OPENAI"
       - key: AUTONOMOUS_MODE
         value: "false"
+<<<<<<< HEAD
     startCommand: "python main.py" # Runs background worker thread in main.py
+=======
+    startCommand: "python main.py"
+>>>>>>> 5097eee (Full upgrade: Python 3.12.2, production-ready main.py, entrypoint.sh, gunicorn_conf.py, .render.yaml)
     disk:
       mountPath: /tmp/britton_evidence
       sizeGB: 1
