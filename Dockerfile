@@ -1,6 +1,5 @@
 # ---------- Multi-stage Dockerfile for DealFasterr / BrittonMethod ----------
-# Production-ready. Builds optional heavy components only when requested via build-args.
-# Defaults are safe for small cloud hosts (Playwright and heavy LLM libs are OFF).
+# Production-ready, CPU-only ML by default. Optional heavy components installed via build-args.
 
 # ---------- Builder stage ----------
 FROM python:3.11-slim AS builder
@@ -8,7 +7,7 @@ FROM python:3.11-slim AS builder
 LABEL maintainer="DealFasterr / BrittonMethod <ops@dealfasterr.com>" \
       org.opencontainers.image.source="https://github.com/dealfasterrllc-code/BrittonMethod-auto"
 
-# Build-time toggles (use docker build --build-arg ...)
+# Build-time toggles
 ARG INSTALL_PLAYWRIGHT="0"
 ARG INSTALL_TRANSFORMERS="0"
 ARG INSTALL_TORCH="0"
@@ -24,14 +23,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# Install minimal build deps common to all builds
+# Install essential build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl wget ca-certificates git unzip gnupg \
-    locales procps \
+    build-essential curl wget ca-certificates git unzip gnupg locales procps \
  && rm -rf /var/lib/apt/lists/*
 
-# If Playwright is requested, install extra OS libs required for browsers (Chromium)
-# Note: this block runs only if INSTALL_PLAYWRIGHT=1 at build time.
+# Optional OS dependencies for Playwright (Chromium)
 RUN if [ "${INSTALL_PLAYWRIGHT}" = "1" ]; then \
       apt-get update && apt-get install -y --no-install-recommends \
         libnss3 libatk1.0-0 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 \
@@ -42,40 +39,39 @@ RUN if [ "${INSTALL_PLAYWRIGHT}" = "1" ]; then \
       echo "Playwright not requested: skipping heavy OS libs"; \
     fi
 
-# Copy only requirements first for Docker layer caching
+# Copy requirements first (Docker cache optimization)
 COPY requirements.txt /app/requirements.txt
 
-# Create virtualenv and install Python runtime deps
+# Create virtualenv and install Python packages
 RUN python -m venv ${VENV_PATH} \
  && ${VENV_PATH}/bin/pip install --upgrade pip setuptools wheel \
  && ${VENV_PATH}/bin/pip install --no-cache-dir -r /app/requirements.txt
 
 ENV PATH="${VENV_PATH}/bin:$PATH"
 
-# Optional Playwright python package + browsers in builder (if requested)
+# Optional Playwright package + Chromium installation
 RUN if [ "${INSTALL_PLAYWRIGHT}" = "1" ]; then \
-      echo "Installing Playwright package and browsers (builder)..." ; \
-      ${VENV_PATH}/bin/pip install --no-cache-dir playwright || true ; \
-      # Install browsers to PLAYWRIGHT_BROWSERS_PATH
-      PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH} ${VENV_PATH}/bin/python -m playwright install --with-deps chromium || true ; \
+      echo "Installing Playwright + browsers..." ; \
+      pip install --no-cache-dir playwright || true ; \
+      PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH} python -m playwright install --with-deps chromium || true ; \
     else \
       echo "Skipping Playwright installation in builder"; \
     fi
 
-# Optional heavy Python libs (transformers / torch) only when requested
+# Optional heavy ML packages (CPU-only)
 RUN if [ "${INSTALL_TRANSFORMERS}" = "1" ]; then \
-      ${VENV_PATH}/bin/pip install --no-cache-dir transformers || true ; \
+      pip install --no-cache-dir transformers || true ; \
     else \
       echo "Skipping transformers"; \
     fi
 
 RUN if [ "${INSTALL_TORCH}" = "1" ]; then \
-      ${VENV_PATH}/bin/pip install --no-cache-dir torch || true ; \
+      pip install --no-cache-dir torch cpuonly || true ; \
     else \
       echo "Skipping torch"; \
     fi
 
-# Create evidence dir in builder so we can copy it (with safe perms)
+# Prepare evidence directory
 RUN mkdir -p /tmp/britton_evidence && chmod 0755 /tmp/britton_evidence
 
 # ---------- Runtime stage ----------
@@ -91,7 +87,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     VENV_PATH=${VENV_PATH} \
     PATH="${VENV_PATH}/bin:$PATH" \
-    PORT=8000 \
+    PORT=10000 \
     EVIDENCE_DIR=/tmp/britton_evidence \
     PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH} \
     PIP_NO_CACHE_DIR=1 \
@@ -99,23 +95,22 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /app
 
-# Minimal runtime OS packages; keep small unless Playwright browsers are used
+# Minimal runtime OS packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Copy virtualenv (Python packages) from builder
+# Copy virtualenv from builder
 COPY --from=builder ${VENV_PATH} ${VENV_PATH}
 
-# Copy app source
+# Copy source code
 COPY . /app
 
-# Copy Playwright browsers directory from builder if present (best-effort)
+# Copy Playwright browsers if built
 COPY --from=builder ${PLAYWRIGHT_BROWSERS_PATH} ${PLAYWRIGHT_BROWSERS_PATH} || true
-# Ensure safe permissions (do not make world-writable)
 RUN if [ -d "${PLAYWRIGHT_BROWSERS_PATH}" ]; then chmod -R 0755 ${PLAYWRIGHT_BROWSERS_PATH} || true; fi
 
-# Ensure evidence dir exists and create non-root user with safe ownership
+# Ensure evidence dir exists and create safe non-root user
 RUN mkdir -p ${EVIDENCE_DIR} \
     && groupadd --gid 1000 appgroup || true \
     && useradd --create-home --no-log-init --uid 1000 --gid appgroup --shell /usr/sbin/nologin appuser || true \
@@ -132,14 +127,14 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Default gunicorn-related ENV (conservative defaults for small hosts)
+# Default Gunicorn envs (conservative for small cloud host)
 ENV GUNICORN_WORKERS=2 \
     GUNICORN_THREADS=2 \
     GUNICORN_TIMEOUT=120 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# Ensure entrypoint.sh is executable (entrypoint is expected in repo root)
+# Make entrypoint executable
 RUN if [ -f /app/entrypoint.sh ]; then chmod +x /app/entrypoint.sh || true; fi
 
-# Default to using the repository entrypoint script
+# Default to entrypoint script
 CMD ["./entrypoint.sh"]
