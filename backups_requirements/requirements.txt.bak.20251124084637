@@ -1,0 +1,92 @@
+# === Core runtime / utilities ===
+requests==2.28.2
+python-dotenv==1.0.0
+beautifulsoup4==4.11.1
+pandas>=2.1.0
+numpy>=2.3.0
+uuid==1.30.0
+
+# === Web / app servers & UX ===
+Flask==2.2.5
+gunicorn==20.1.0
+uvicorn==0.22.0
+streamlit>=1.26.0   # Upgraded to support pandas>=2.1
+
+# === DB, ORM, migrations ===
+SQLAlchemy==1.4.52
+sqlalchemy-utils==0.41.0
+psycopg2-binary>=2.9.6
+alembic==1.11.1
+geoalchemy2==0.18.1  # Compatible with Python 3.11
+
+# === Queues & background jobs ===
+redis==4.5.5
+rq==1.1.0
+celery[redis]==5.6.0  # Latest stable Python 3.11-compatible
+
+# === ML / modeling / stats (for online + fallback) ===
+scikit-learn==1.2.2
+xgboost==1.7.5
+joblib==1.3.2
+matplotlib==3.6.3
+
+# === OpenAI / LLM / APIs / embeddings ===
+openai==0.27.8
+tavily-python==0.3.5
+twilio==8.10.0          # Python 3.11 compatible
+sentence-transformers==2.2.2
+pinecone-client==2.2.1
+
+# === Transformers & local inference (optional fallback LLM) ===
+transformers==4.35.0
+torch==2.2.0            # CPU-only; GPU: torch==2.2.0+cu118
+accelerate==0.25.0
+
+# === AWS / storage / S3 ===
+boto3>=1.26.152
+s3fs==2023.12.1
+fsspec==2023.12.1
+
+# === Documents & reporting ===
+python-docx==0.8.11
+openpyxl==3.1.2
+xlsxwriter==3.1.2
+reportlab==4.0
+Pillow==9.5.0
+pdfminer.six==20221105
+
+# === HTTP clients & async ===
+httpx==0.24.1
+aiohttp==3.8.4
+
+# === Scraping / headless browsers ===
+playwright==1.33.0          # Install chromium: python -m playwright install chromium
+selenium==4.10.0
+undetected-chromedriver==3.4.0
+
+# === Search / indexing / analytics ===
+elasticsearch==8.8.0
+prometheus-client==0.16.0
+opentelemetry-api==1.14.0
+opentelemetry-sdk==1.14.0
+
+# === Geospatial & address tools ===
+geopy==2.3.0
+usaddress==0.5.10
+shapely==2.0.1
+
+# === Validation / data modeling ===
+pydantic==1.10.12
+
+# === File type detection / magic ===
+python-magic==0.4.27
+
+# === Security / encryption / auth ===
+cryptography==41.0
+python-jose==3.3.0
+
+# === Monitoring / error tracking ===
+sentry-sdk==1.28.0
+
+# === Optional convenience / integrations ===
+python-multipart==0.0.6

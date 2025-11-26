@@ -1,0 +1,31 @@
+# Minimal, tested pins for Python 3.12 and Render compatibility
+# Core
+requests==2.28.2
+python-dotenv==1.0.0
+beautifulsoup4==4.14.2
+
+# Data
+pandas>=2.1.0
+numpy>=2.3.0
+
+# Web
+Flask==2.2.5
+gunicorn==20.1.0
+uvicorn==0.22.0
+# streamlit version >=1.51 supports pandas>=2
+streamlit>=1.51.0
+
+# DB / ORM
+SQLAlchemy==2.0.44
+psycopg2-binary>=2.9.11
+alembic==1.17.2
+
+# Queue & worker - celery 5.5.3 is known to install on CPython 3.12
+redis>=4.5.5
+celery[redis]==5.5.3
+
+# Twilio (updated)
+twilio==8.10.0
+
+# Optional helpful tools (smaller)
+python-dotenv==1.0.0

@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+main.py — Flask app with provider shim and auto-failover between DEEPSEEK -> GROQ -> OPENAI.
+
+Provider behavior:
+ - Tries providers in order (based on MODEL_PROVIDER_PRIMARY/SECONDARY/TERTIARY).
+ - For DEEPSEEK/GROQ expects optional *_API_URL in env; if absent, it will skip to next provider.
+ - For OPENAI uses OPENAI_API_URL and OPENAI_API_KEY if available.
+ - All provider attempts are wrapped with timeouts and robust exception handling.
+ - The shim returns structured JSON: {"ok": True, "response": "...", "provider": "DEEPSEEK"} on success.
+"""
+
+from __future__ import annotations
+import os, sys, json, time, logging, traceback
+from typing import Dict, Any, Optional
+from flask import Flask, request, jsonify, abort, Response
+from dotenv import load_dotenv
+
+# load env
+load_dotenv()
+
+# basic logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
+logger = logging.getLogger("britton.main")
+
+# env vars
+MODEL_ORDER = [
+    os.environ.get("MODEL_PROVIDER_PRIMARY", "DEEPSEEK").upper(),
+    os.environ.get("MODEL_PROVIDER_SECONDARY", "GROQ").upper(),
+    os.environ.get("MODEL_PROVIDER_TERTIARY", "OPENAI").upper()
+]
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_API_URL = os.environ.get("DEEPSEEK_API_URL", "").strip()
+GROQ_API_KEY = os.environ.get("GROK_API_KEY", "").strip()
+GROQ_API_URL = os.environ.get("GROQ_API_URL", "").strip()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions").strip()
+
+# small helper to call HTTP endpoints
+import requests
+REQUEST_TIMEOUT = 12  # seconds
+
+def _call_deepseek(prompt: str, max_tokens: int = 512) -> Optional[Dict[str, Any]]:
+    """Try DEEPSEEK provider if configured. Expects DEEPSEEK_API_URL or compatible endpoint."""
+    if not DEEPSEEK_API_KEY:
+        logger.debug("DEEPSEEK missing key, skipping.")
+        return None
+    if not DEEPSEEK_API_URL:
+        logger.debug("DEEPSEEK_API_URL not set, skipping.")
+        return None
+    try:
+        hdr = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+        payload = {"prompt": prompt, "max_tokens": max_tokens}
+        r = requests.post(DEEPSEEK_API_URL, json=payload, headers=hdr, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        j = r.json()
+        # Try common fields
+        text = None
+        if isinstance(j, dict):
+            # common patterns: j["response"], j["text"], j.get("choices")[0]["text"]
+            text = j.get("response") or j.get("text")
+            if not text and "choices" in j and isinstance(j["choices"], list) and j["choices"]:
+                c = j["choices"][0]
+                text = c.get("text") or (c.get("message") and c["message"].get("content"))
+        if not text:
+            # fallback to string-ifying the body
+            text = json.dumps(j)[:2000]
+        return {"ok": True, "response": str(text), "provider": "DEEPSEEK", "raw": j}
+    except Exception as e:
+        logger.exception("DEEPSEEK call failed")
+        return None
+
+def _call_groq(prompt: str, max_tokens: int = 512) -> Optional[Dict[str, Any]]:
+    """Try GROQ provider if configured. Expects GROQ_API_URL or compatible endpoint."""
+    if not GROQ_API_KEY:
+        logger.debug("GROQ missing key, skipping.")
+        return None
+    if not GROQ_API_URL:
+        logger.debug("GROQ_API_URL not set, skipping.")
+        return None
+    try:
+        hdr = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+        payload = {"prompt": prompt, "max_tokens": max_tokens}
+        r = requests.post(GROQ_API_URL, json=payload, headers=hdr, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        j = r.json()
+        text = None
+        if isinstance(j, dict):
+            text = j.get("response") or j.get("text")
+            if not text and "choices" in j and isinstance(j["choices"], list) and j["choices"]:
+                c = j["choices"][0]
+                text = c.get("text") or (c.get("message") and c["message"].get("content"))
+        if not text:
+            text = json.dumps(j)[:2000]
+        return {"ok": True, "response": str(text), "provider": "GROQ", "raw": j}
+    except Exception as e:
+        logger.exception("GROQ call failed")
+        return None
+
+def _call_openai(prompt: str, max_tokens: int = 512, model: str = "gpt-4o-mini") -> Optional[Dict[str, Any]]:
+    """Try OpenAI using REST API directly (no dependency on openai package)."""
+    if not OPENAI_API_KEY:
+        logger.debug("OPENAI_API_KEY missing, skipping.")
+        return None
+    try:
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+        # Use chat completions v1 compatible shape
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+        }
+        r = requests.post(OPENAI_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        j = r.json()
+        # parse taken from common OpenAI responses
+        text = None
+        if isinstance(j, dict):
+            if "choices" in j and isinstance(j["choices"], list) and j["choices"]:
+                ch = j["choices"][0]
+                # chat completions: ch["message"]["content"]
+                if "message" in ch and isinstance(ch["message"], dict):
+                    text = ch["message"].get("content")
+                else:
+                    text = ch.get("text") or ch.get("content")
+            elif "response" in j:
+                text = j.get("response")
+        if not text:
+            text = json.dumps(j)[:2000]
+        return {"ok": True, "response": str(text), "provider": "OPENAI", "raw": j}
+    except Exception:
+        logger.exception("OpenAI call failed")
+        return None
+
+def provider_chain(prompt: str, max_tokens: int = 512, model: str = "gpt-4o-mini") -> Dict[str, Any]:
+    """Attempt providers in MODEL_ORDER. Do not raise; always return an object with ok flag."""
+    logger.info("Provider chain start. Order=%s", MODEL_ORDER)
+    tried = []
+    for provider in MODEL_ORDER:
+        provider = (provider or "").upper()
+        if not provider:
+            continue
+        try:
+            if provider == "DEEPSEEK":
+                tried.append("DEEPSEEK")
+                out = _call_deepseek(prompt, max_tokens=max_tokens)
+                if out and out.get("ok"):
+                    logger.info("DEEPSEEK succeeded")
+                    return out
+                logger.info("DEEPSEEK returned no usable result; trying next.")
+            elif provider == "GROQ" or provider == "GROQ_PROVIDER":
+                tried.append("GROQ")
+                out = _call_groq(prompt, max_tokens=max_tokens)
+                if out and out.get("ok"):
+                    logger.info("GROQ succeeded")
+                    return out
+                logger.info("GROQ returned no usable result; trying next.")
+            elif provider == "OPENAI":
+                tried.append("OPENAI")
+                out = _call_openai(prompt, max_tokens=max_tokens, model=model)
+                if out and out.get("ok"):
+                    logger.info("OPENAI succeeded")
+                    return out
+                logger.info("OPENAI returned no usable result; trying next.")
+            else:
+                logger.debug("Unknown provider in MODEL_ORDER: %s", provider)
+        except Exception:
+            logger.exception("Provider %s threw exception", provider)
+            continue
+    # final fallback: echo
+    logger.warning("All providers failed or returned no result; returning echo fallback.")
+    return {"ok": True, "response": f"(echo fallback) {prompt}", "provider": "ECHO", "raw": {"tried": tried}}
+
+# Flask app
+app = Flask(__name__)
+
+def require_api_key_or_abort():
+    API_KEY = os.environ.get("BRITTON_API_KEY", "")
+    if not API_KEY:
+        return True
+    key = request.headers.get("X-API-KEY") or request.args.get("api_key")
+    if not key or key != API_KEY:
+        abort(Response("Missing or invalid API key", status=401))
+    return True
+
+def get_payload():
+    p = request.get_json(silent=True)
+    if p is None:
+        raw = request.get_data(as_text=True).strip() or ""
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {"prompt": parsed}
+        except Exception:
+            return {"prompt": raw}
+    if isinstance(p, dict):
+        return p
+    if isinstance(p, str):
+        return {"prompt": p}
+    return {"_raw": str(p)}
+
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"service":"BrittonMethod-auto", "ok": True})
+
+@app.route("/prompt", methods=["POST"])
+def api_prompt():
+    try:
+        require_api_key_or_abort()
+        payload = get_payload()
+        prompt = str(payload.get("prompt", "")).strip()
+        if not prompt:
+            return jsonify({"ok": False, "error": "missing_prompt"}), 400
+        model = payload.get("model", "gpt-4o-mini")
+        max_tokens = int(payload.get("max_tokens", 512))
+        start = time.time()
+        out = provider_chain(prompt, max_tokens=max_tokens, model=model)
+        out["latency_seconds"] = round(time.time() - start, 3)
+        return jsonify(out)
+    except Exception:
+        logger.exception("Unhandled exception in /prompt")
+        return jsonify({"ok": False, "error": "internal"}), 500
+
+@app.route("/generate/loi", methods=["POST"])
+def generate_loi():
+    try:
+        require_api_key_or_abort()
+        payload = get_payload()
+        prompt = payload.get("prompt") or f"Generate an LOI for property data: {json.dumps(payload)}"
+        # use provider_chain
+        out = provider_chain(prompt, max_tokens=int(payload.get("max_tokens", 1024)))
+        return jsonify(out)
+    except Exception:
+        logger.exception("Unhandled exception in /generate/loi")
+        return jsonify({"ok": False, "error": "internal"}), 500
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True, "time": time.time(), "providers": MODEL_ORDER})
+
+if __name__ == "__main__":
+    PORT = int(os.environ.get("PORT", 8000))
+    logger.info("Starting Flask debug server on port %s", PORT)
+    app.run(host="0.0.0.0", port=PORT, threaded=True)

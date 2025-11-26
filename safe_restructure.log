@@ -1,0 +1,20 @@
+[2025-11-25T03:11:17Z] Starting safe repo restructuring...
+Checking repo structure...
+Found: app_core.py
+Found: main.py
+Found: celery_app.py
+Found: britton_underwriter_master.py
+Warning: Missing britton_webscraper_master.py
+Found: britton_personas.py
+Checking Python version...
+Python 3.12.2
+Checking for blank terminal safe run...
+prompts/ exists; using existing
+britton_underwriter_master.py already in prompts/; skipping move
+Warning: britton_webscraper_master.py not found anywhere; skipping
+britton_personas.py already in prompts/; skipping move
+Created __init__.py
+Updated imports in app_core.py
+Updated imports in main.py
+Updated imports in celery_app.py
+Running Python import test...

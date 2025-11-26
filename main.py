@@ -7,8 +7,14 @@ This file is a full, final, end-to-end implementation that:
    job enqueueing (analyze / verify / simulate), job lookup and list.
  - Wires to app_core when available (preserves original logic & deterministic fallback).
  - Attempts to use a provider factory (providers.factory) if present to make Gemini primary.
+<<<<<<< HEAD
  - Uses a background worker thread and optional SQLAlchemy persistence.
  - Stores evidence locally or to S3 (if configured).
+=======
+ - Uses a background worker thread and graceful shutdown.
+ - Stores evidence locally or to S3 (if configured).
+ - Optional SQLAlchemy persistence.
+>>>>>>> b0211868 (chore: full safe commit of all files)
  - Designed to run under Gunicorn (recommended) or direct Flask dev server.
 """
 
@@ -597,4 +603,9 @@ if __name__ == "__main__":
     logger.info("Starting BrittonMethod-auto (Flask debug server) on port %s", PORT)
     logger.info("Primary provider: %s; app_core=%s; provider_factory=%s", MODEL_PROVIDER_PRIMARY, APP_CORE_AVAILABLE, bool(PROVIDER_FACTORY))
     app.run(host="0.0.0.0", port=PORT, threaded=True)
+<<<<<<< HEAD
 
+=======
+import prompts
+import prompts
+>>>>>>> b0211868 (chore: full safe commit of all files)

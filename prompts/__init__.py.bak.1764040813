@@ -1,0 +1,10 @@
+# Auto-generated __init__.py for prompts package
+import importlib
+def get_britton_underwriter_master():
+    return importlib.import_module('.britton_underwriter_master', package='prompts')
+import importlib
+def get_britton_webscraper_master():
+    return importlib.import_module('.britton_webscraper_master', package='prompts')
+import importlib
+def get_britton_personas():
+    return importlib.import_module('.britton_personas', package='prompts')

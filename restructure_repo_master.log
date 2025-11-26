@@ -1,0 +1,9 @@
+[2025-11-25T03:09:21Z] Starting repo restructuring...
+prompts/ directory exists
+Warning: britton_underwriter_master.py not found in repo root; skipping
+Warning: britton_webscraper_master.py not found in repo root; skipping
+Moved britton_personas.py into prompts/
+Created prompts/__init__.py with imports
+Updated imports in app_core.py (backup created)
+Updated imports in main.py (backup created)
+Updated imports in celery_app.py (backup created)

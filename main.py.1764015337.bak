@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""
+Hardened main.py with provider failover:
+ - tries DEEPSEEK (if URL & key set and DNS resolves)
+ - on failure tries GROQ (if configured)
+ - on failure tries OpenAI
+ - retries, handles 429 by switching providers
+ - /generate/loi and /prompt endpoints
+"""
+from __future__ import annotations
+import os, sys, json, time, logging, traceback, socket
+from typing import Dict, Any, Optional
+from flask import Flask, request, jsonify, abort, Response
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# config
+BRITTON_API_KEY = os.getenv("BRITTON_API_KEY","").strip()
+DEEPSEEK_API_URL = os.getenv("DEEPSEEK_API_URL","").strip()
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY","").strip()
+GROQ_API_URL = os.getenv("GROQ_API_URL","").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY","").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY","").strip()
+
+logger = logging.getLogger("britton.main")
+logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+app = Flask(__name__)
+
+def _dns_resolves(hostname: str) -> bool:
+    try:
+        # handle full URL -> extract hostname
+        if "://" in hostname:
+            hostname = hostname.split("://",1)[1].split("/",1)[0]
+        socket.getaddrinfo(hostname, None)
+        return True
+    except Exception:
+        return False
+
+def _try_call(provider_name: str, url: str, headers: Dict[str,str], payload: Dict[str,Any], timeout=8) -> Optional[str]:
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        # If we get a 429 or other 5xx, return special marker to cause failover
+        if r.status_code == 429:
+            logger.warning("%s returned 429 (rate limit)", provider_name)
+            return None
+        if r.status_code >= 500:
+            logger.warning("%s returned %s (server error)", provider_name, r.status_code)
+            return None
+        if r.status_code >= 400:
+            logger.info("%s returned %s: %s", provider_name, r.status_code, r.text[:200])
+            return None
+        # Best-effort: parse JSON and find string response
+        try:
+            j = r.json()
+            # common shapes: { "response": "..."} or { "output": "..."} or chat style
+            for k in ("response","output","text","result","choices"):
+                if k in j:
+                    v = j[k]
+                    # handle choices -> first message content
+                    if k=="choices" and isinstance(v, list) and v:
+                        c = v[0]
+                        # OpenAI-like shape: choices[0].message.content
+                        if isinstance(c, dict):
+                            if "message" in c and isinstance(c["message"], dict):
+                                return c["message"].get("content") or str(j)
+                            if "text" in c:
+                                return c.get("text")
+                        return str(c)
+                    if isinstance(v, str):
+                        return v
+                    # if dict with text key
+                    if isinstance(v, dict) and "text" in v:
+                        return v["text"]
+            # fallback: try scanned text fields
+            txt = json.dumps(j)
+            return txt
+        except Exception:
+            return r.text
+    except requests.exceptions.RequestException as e:
+        logger.debug("RequestException to %s: %s", provider_name, str(e))
+        return None
+
+def _shim_provider(prompt: str, max_tokens:int=1024) -> Dict[str,Any]:
+    """
+    Try providers in order: DEEPSEEK -> GROQ -> OPENAI
+    Return {ok:bool, response:str, provider:str, tried:[...], raw:obj}
+    """
+    tried = []
+    # 1) DEEPSEEK
+    if DEEPSEEK_API_URL and DEEPSEEK_API_KEY:
+        tried.append("DEEPSEEK")
+        if _dns_resolves(DEEPSEEK_API_URL):
+            headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type":"application/json"}
+            payload = {"prompt": prompt}
+            for attempt in (1,2):
+                out = _try_call("DEEPSEEK", DEEPSEEK_API_URL, headers, payload)
+                if out:
+                    return {"ok":True, "response":out, "provider":"DEEPSEEK", "tried":tried}
+                time.sleep(0.5*attempt)
+        else:
+            logger.info("DEEPSEEK hostname did not resolve; skipping DEEPSEEK.")
+    # 2) GROQ
+    if GROQ_API_URL and GROQ_API_KEY:
+        tried.append("GROQ")
+        if _dns_resolves(GROQ_API_URL):
+            headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type":"application/json"}
+            payload = {"input": prompt}
+            out = _try_call("GROQ", GROQ_API_URL, headers, payload)
+            if out:
+                return {"ok":True, "response":out, "provider":"GROQ", "tried":tried}
+        else:
+            logger.info("GROQ hostname did not resolve; skipping GROQ.")
+    # 3) OpenAI (fallback)
+    if OPENAI_API_KEY:
+        tried.append("OPENAI")
+        # Use the OpenAI chat completions endpoint via requests to avoid optional openai package
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type":"application/json"}
+        payload = {
+            "model":"gpt-4o-mini",
+            "messages":[{"role":"user","content":prompt}],
+            "max_tokens": max_tokens,
+            "temperature":0.0
+        }
+        out = _try_call("OPENAI", url, headers, payload, timeout=12)
+        if out:
+            return {"ok":True, "response":out, "provider":"OPENAI", "tried":tried}
+    # All failed -> echo fallback
+    logger.warning("All providers failed or returned no result; returning echo fallback.")
+    return {"ok":True, "response":f"(echo fallback) {prompt}", "provider":"ECHO", "raw":None, "tried":tried}
+
+# endpoints
+def require_api_key():
+    if not BRITTON_API_KEY:
+        return True
+    header = request.headers.get("X-API-KEY") or request.args.get("api_key")
+    if not header or header != BRITTON_API_KEY:
+        abort(Response("Missing or invalid API key", status=401))
+    return True
+
+@app.route("/prompt", methods=["POST"])
+def endpoint_prompt():
+    require_api_key()
+    data = request.get_json(silent=True)
+    if not data:
+        raw = request.get_data(as_text=True).strip() or ""
+        data = {"prompt": raw}
+    prompt = data.get("prompt","")
+    if not prompt:
+        return jsonify({"ok":False, "error":"no_prompt"}), 400
+    res = _shim_provider(prompt)
+    return jsonify(res)
+
+@app.route("/generate/loi", methods=["POST"])
+def endpoint_loi():
+    require_api_key()
+    data = request.get_json(silent=True) or {}
+    prompt = data.get("prompt") or f"Generate a professional LOI for the property data: {json.dumps(data, indent=2)}"
+    res = _shim_provider(prompt, max_tokens=1200)
+    return jsonify(res)
+
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"ok":True, "service":"BrittonMethod-auto"})
+
+if __name__ == "__main__":
+    print("Starting Flask debug server on port", os.getenv("PORT", "8000"))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), threaded=True)

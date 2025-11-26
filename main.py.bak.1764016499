@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""
+main.py — Production-ready Flask entry for BrittonMethod-auto
+Provider shim: attempts providers in order with retries/backoff and robust logging.
+Primary order controlled by env: MODEL_PROVIDER_PRIMARY, MODEL_PROVIDER_SECONDARY, MODEL_PROVIDER_TERTIARY
+Providers supported (via env/config):
+ - GROK (GROK_API_URL + GROK_API_KEY)
+ - DEEPSEEK (DEEPSEEK_API_URL + DEEPSEEK_API_KEY)
+ - OPENAI (OPENAI_API_KEY)
+If all fail, returns an echo fallback.
+"""
+
+from __future__ import annotations
+import os
+import sys
+import json
+import uuid
+import time
+import atexit
+import signal
+import logging
+import traceback
+import hashlib
+import threading
+import queue
+from datetime import datetime
+from typing import Dict, Any, Optional, List
+
+from flask import Flask, request, jsonify, abort, Response
+from dotenv import load_dotenv
+
+# Load .env if present
+load_dotenv()
+
+# -------------------------
+# Basic configuration (env)
+# -------------------------
+API_KEY = os.environ.get("BRITTON_API_KEY", "").strip()
+EVIDENCE_DIR = os.environ.get("EVIDENCE_DIR", "/tmp/britton_evidence")
+USE_S3 = os.environ.get("USE_S3", "false").lower() in ("1", "true", "yes")
+S3_BUCKET = os.environ.get("S3_BUCKET", "")
+S3_REGION = os.environ.get("S3_REGION", os.environ.get("AWS_REGION", "us-east-1"))
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///britton.db")
+REDIS_URL = os.environ.get("REDIS_URL", "")
+CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.7"))
+HUMAN_IN_LOOP_VALUE = float(os.environ.get("HUMAN_IN_LOOP_VALUE", "50000000"))
+MAX_VERIFICATION_ATTEMPTS = int(os.environ.get("MAX_VERIFICATION_ATTEMPTS", "10"))
+
+# Provider config (env)
+MODEL_PROVIDER_PRIMARY = os.environ.get("MODEL_PROVIDER_PRIMARY", "GROK").upper()
+MODEL_PROVIDER_SECONDARY = os.environ.get("MODEL_PROVIDER_SECONDARY", "DEEPSEEK").upper()
+MODEL_PROVIDER_TERTIARY = os.environ.get("MODEL_PROVIDER_TERTIARY", "OPENAI").upper()
+
+# Provider connection strings (must be set in .env)
+GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
+GROK_API_URL = os.environ.get("GROK_API_URL", "")  # set to the base endpoint used by your Grok provider (if any)
+
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_URL = os.environ.get("DEEPSEEK_API_URL", "")  # must be set from DeepSeek docs/account
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1")
+
+os.makedirs(EVIDENCE_DIR, exist_ok=True)
+
+# -------------------------
+# Logging
+# -------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("britton.main")
+
+# -------------------------
+# Optional imports (SQLAlchemy, app_core, S3)
+# -------------------------
+SessionLocal = None
+JobModel = None
+ModelsBase = None
+try:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from models import Base as ModelsBase, Job as JobModel
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
+    SessionLocal = sessionmaker(bind=engine)
+    if ModelsBase:
+        ModelsBase.metadata.create_all(bind=engine)
+    logger.info("SQLAlchemy configured.")
+except Exception:
+    logger.debug("SQLAlchemy not available or failed (ok for local dev).", exc_info=True)
+
+# app_core optional
+_app_core = None
+try:
+    import app_core as ac
+    _app_core = ac
+    logger.info("Loaded app_core (optional) implementations.")
+except Exception:
+    logger.debug("No app_core available; using shims.", exc_info=True)
+
+# S3 optional
+S3_CLIENT = None
+if USE_S3:
+    try:
+        import boto3
+        S3_CLIENT = boto3.client("s3", region_name=S3_REGION)
+        logger.info("S3 client configured.")
+    except Exception:
+        logger.exception("boto3 import failed; falling back to local storage.")
+        S3_CLIENT = None
+
+# requests (for provider HTTP calls)
+try:
+    import requests
+except Exception:
+    requests = None
+    logger.exception("requests is required for remote provider calls. Install python-requests.")
+
+# -------------------------
+# Utilities (jobs, storage)
+# -------------------------
+JOB_QUEUE: queue.Queue = queue.Queue()
+JOB_STORE: Dict[str, Dict[str, Any]] = {}
+_SHUTDOWN_EVENT = threading.Event()
+
+def mask_key(k: Optional[str]) -> str:
+    if not k:
+        return "MISSING"
+    s = str(k)
+    return s[:6] + "..." + s[-4:] if len(s) > 12 else s[:4] + "..." + s[-4:]
+
+def store_evidence_binary_default(kind: str, data: bytes, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    meta = meta or {}
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    filename = f"{kind}_{ts}_{uuid.uuid4().hex}.bin"
+    local_path = os.path.join(EVIDENCE_DIR, filename)
+    try:
+        if USE_S3 and S3_CLIENT and S3_BUCKET:
+            key = filename
+            S3_CLIENT.put_object(Bucket=S3_BUCKET, Key=key, Body=data)
+            return {"ok": True, "store": "s3", "path": f"s3://{S3_BUCKET}/{key}", "meta": meta}
+        else:
+            with open(local_path, "wb") as f:
+                f.write(data)
+            return {"ok": True, "store": "local", "path": local_path, "meta": meta}
+    except Exception:
+        logger.exception("Failed to store evidence")
+        return {"ok": False, "error": "store_failed"}
+
+store_evidence_binary = getattr(_app_core, "store_evidence_binary", None) or store_evidence_binary_default
+
+# -------------------------
+# Provider/failover shim
+# -------------------------
+DEFAULT_RETRIES = 3
+DEFAULT_BACKOFF = 1.0  # seconds base
+
+def _http_post_with_retry(url: str, headers: Dict[str, str], json_payload: Dict[str, Any], retries: int = DEFAULT_RETRIES) -> Dict[str, Any]:
+    """
+    Simple requests POST with retries and exponential backoff. Returns a dict:
+    {ok: bool, status: int, body: <parsed json or text>, error: optional}
+    """
+    if requests is None:
+        return {"ok": False, "error": "requests_missing"}
+    attempt = 0
+    last_exc = None
+    while attempt <= retries:
+        try:
+            resp = requests.post(url, headers=headers, json=json_payload, timeout=18)
+            status = resp.status_code
+            content_type = resp.headers.get("Content-Type", "")
+            text = resp.text or ""
+            try:
+                body = resp.json()
+            except Exception:
+                body = text
+            if 200 <= status < 300:
+                return {"ok": True, "status": status, "body": body}
+            else:
+                # rate-limit or server errors get logged and retried on some codes
+                last_exc = {"status": status, "body": body}
+                if status in (429, 502, 503, 504):
+                    # backoff and retry
+                    backoff = DEFAULT_BACKOFF * (2 ** attempt)
+                    logger.warning("HTTP %s from %s -- retrying after %.1fs (attempt %d)", status, url, backoff, attempt)
+                    time.sleep(backoff)
+                else:
+                    # non-retryable 4xx (often client config) - return failure fast
+                    return {"ok": False, "status": status, "body": body}
+        except Exception as e:
+            last_exc = e
+            backoff = DEFAULT_BACKOFF * (2 ** attempt)
+            logger.warning("Request exception to %s: %s -- backoff %.1fs (attempt %d)", url, str(e), backoff, attempt)
+            time.sleep(backoff)
+        attempt += 1
+    return {"ok": False, "error": last_exc}
+
+def _call_grok(prompt: str, model: str = "grok-1", max_tokens: int = 512, temperature: float = 0.0) -> Optional[Dict[str, Any]]:
+    """
+    Call Grok-like endpoint. Requires GROK_API_URL and GROK_API_KEY set in env.
+    The exact payload depends on provider; this function attempts a generic approach.
+    """
+    if not GROK_API_URL or not GROK_API_KEY:
+        logger.debug("GROK configuration missing")
+        return None
+    url = GROK_API_URL.rstrip("/")  # user must supply full endpoint path if required
+    payload = {"prompt": prompt, "max_tokens": max_tokens, "temperature": temperature, "model": model}
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+    out = _http_post_with_retry(url, headers, payload)
+    if out.get("ok"):
+        body = out.get("body")
+        # try common response fields
+        if isinstance(body, dict):
+            # common field names: "response", "text", "output", "completion"
+            for k in ("response", "text", "output", "completion", "choices"):
+                if k in body:
+                    return {"ok": True, "response": body.get(k)}
+            # choices style (like OpenAI)
+            if "choices" in body and isinstance(body["choices"], list) and len(body["choices"])>0:
+                ch = body["choices"][0]
+                if isinstance(ch, dict) and ("text" in ch or "message" in ch):
+                    return {"ok": True, "response": ch.get("text") or ch.get("message")}
+            # fallback: tostring
+            return {"ok": True, "response": json.dumps(body)}
+    else:
+        logger.info("GROK returned failure: %s", out.get("status") or out.get("error"))
+    return None
+
+def _call_deepseek(prompt: str, max_tokens: int = 512, temperature: float = 0.0) -> Optional[Dict[str, Any]]:
+    if not DEEPSEEK_API_URL or not DEEPSEEK_API_KEY:
+        logger.debug("DeepSeek configuration missing")
+        return None
+    url = DEEPSEEK_API_URL.rstrip("/")
+    payload = {"prompt": prompt, "max_tokens": max_tokens, "temperature": temperature}
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    out = _http_post_with_retry(url, headers, payload)
+    if out.get("ok"):
+        body = out.get("body")
+        if isinstance(body, dict):
+            for k in ("response", "text", "output", "completion", "choices"):
+                if k in body:
+                    return {"ok": True, "response": body.get(k)}
+            if "choices" in body and isinstance(body["choices"], list) and len(body["choices"])>0:
+                ch = body["choices"][0]
+                return {"ok": True, "response": ch.get("text") or ch.get("message") or json.dumps(ch)}
+        return {"ok": True, "response": str(body)}
+    else:
+        logger.info("DEEPSEEK returned failure: %s", out.get("status") or out.get("error"))
+    return None
+
+def _call_openai(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 512, temperature: float = 0.0) -> Optional[Dict[str, Any]]:
+    if not OPENAI_API_KEY:
+        logger.debug("OPENAI_API_KEY missing")
+        return None
+    url = OPENAI_API_URL.rstrip("/") + "/chat/completions"
+    # use chat format if available
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": float(temperature),
+    }
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    out = _http_post_with_retry(url, headers, payload)
+    if out.get("ok"):
+        body = out.get("body")
+        try:
+            if isinstance(body, dict):
+                if "choices" in body and isinstance(body["choices"], list) and len(body["choices"])>0:
+                    ch = body["choices"][0]
+                    # support both 'message' and 'text'
+                    if isinstance(ch, dict):
+                        if "message" in ch and isinstance(ch["message"], dict):
+                            return {"ok": True, "response": ch["message"].get("content")}
+                        elif "text" in ch:
+                            return {"ok": True, "response": ch.get("text")}
+                # sometimes body has 'text' or 'response'
+                for k in ("response","text","output"):
+                    if k in body:
+                        return {"ok": True, "response": body.get(k)}
+            return {"ok": True, "response": str(body)}
+        except Exception:
+            logger.exception("Error parsing OpenAI body")
+    else:
+        logger.info("OPENAI returned failure: %s", out.get("status") or out.get("error"))
+    return None
+
+def provider_chain(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 1024, temperature: float = 0.0) -> Dict[str, Any]:
+    """
+    Attempt providers in env-configured order. Return dict: {ok, provider, response, raw, tried:[...], error}
+    """
+    tried: List[str] = []
+    order = [MODEL_PROVIDER_PRIMARY, MODEL_PROVIDER_SECONDARY, MODEL_PROVIDER_TERTIARY]
+    # normalize and filter
+    order = [o for o in [o.upper() for o in order] if o]
+    last_error = None
+    for provider in order:
+        tried.append(provider)
+        try:
+            if provider == "GROK":
+                logger.info("Trying GROK provider (primary candidate).")
+                out = _call_grok(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
+                if out and out.get("ok"):
+                    return {"ok": True, "provider": "GROK", "response": out.get("response"), "raw": out, "tried": tried}
+            elif provider in ("DEEPSEEK", "DEEPSEEKAI", "DEEPSEEK.AI"):
+                logger.info("Trying DeepSeek provider.")
+                out = _call_deepseek(prompt, max_tokens=max_tokens, temperature=temperature)
+                if out and out.get("ok"):
+                    return {"ok": True, "provider": "DEEPSEEK", "response": out.get("response"), "raw": out, "tried": tried}
+            elif provider in ("OPENAI", "AZURE_OPENAI"):
+                logger.info("Trying OpenAI provider.")
+                out = _call_openai(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
+                if out and out.get("ok"):
+                    return {"ok": True, "provider": "OPENAI", "response": out.get("response"), "raw": out, "tried": tried}
+            else:
+                logger.warning("Unknown configured provider: %s -- skipping", provider)
+        except Exception as e:
+            logger.exception("Exception while trying provider %s", provider)
+            last_error = str(e)
+    # if we reach here: no provider returned a result
+    logger.warning("All providers failed or returned no result; returning echo fallback.")
+    return {"ok": False, "provider": "ECHO", "response": f"(echo fallback) {prompt}", "raw": None, "tried": tried, "error": last_error}
+
+# -------------------------
+# Routes & small job queue (kept minimal)
+# -------------------------
+app = Flask(__name__)
+
+def require_api_key():
+    if not API_KEY:
+        return True
+    key = request.headers.get("X-API-KEY") or request.args.get("api_key") or request.json.get("api_key") if request.is_json else None
+    if not key or key != API_KEY:
+        abort(Response("Missing or invalid API key", status=401))
+    return True
+
+def get_payload():
+    p = request.get_json(silent=True)
+    if p is None:
+        raw = request.get_data(as_text=True).strip() or ""
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {"prompt": parsed}
+        except Exception:
+            return {"prompt": raw}
+    if isinstance(p, dict):
+        return p
+    return {"prompt": str(p)}
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True, "time": datetime.utcnow().isoformat() + "Z"})
+
+@app.route("/prompt", methods=["POST"])
+def api_prompt():
+    require_api_key()
+    payload = get_payload()
+    prompt = payload.get("prompt") or ""
+    model = payload.get("model", "gpt-4o-mini")
+    max_tokens = int(payload.get("max_tokens", 512))
+    temperature = float(payload.get("temperature", 0.0))
+    res = provider_chain(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
+    # treat provider success as ok True; echo fallback returns ok False + provider ECHO
+    return jsonify({"latency_seconds": 0.0, **res})
+
+@app.route("/generate/loi", methods=["POST"])
+def api_generate_loi():
+    require_api_key()
+    payload = get_payload()
+    prompt = payload.get("prompt") or f"Generate an LOI for this property:\n{json.dumps(payload, indent=2)}"
+    model = payload.get("model", "gpt-4o-mini")
+    max_tokens = int(payload.get("max_tokens", 1024))
+    temperature = float(payload.get("temperature", 0.0))
+    gen = provider_chain(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
+    # always return structure with ok bool
+    return jsonify(gen)
+
+# lightweight jobs endpoints (kept minimal to avoid interfering with provider shim)
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"service": "BrittonMethod-auto", "ok": True, "time": datetime.utcnow().isoformat() + "Z"})
+
+# Graceful shutdown
+def _graceful_shutdown(signum=None, frame=None):
+    logger.info("Received shutdown signal. Setting shutdown event.")
+    _SHUTDOWN_EVENT.set()
+    time.sleep(0.5)
+    logger.info("Shutdown complete.")
+
+for sig in (signal.SIGINT, signal.SIGTERM):
+    try:
+        signal.signal(sig, _graceful_shutdown)
+    except Exception:
+        logger.debug("Could not set signal handler for %s", sig)
+
+atexit.register(lambda: _SHUTDOWN_EVENT.set())
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    logger.info("Starting BrittonMethod API (debug server) on port %s", port)
+    logger.info("Providers order: %s -> %s -> %s", MODEL_PROVIDER_PRIMARY, MODEL_PROVIDER_SECONDARY, MODEL_PROVIDER_TERTIARY)
+    logger.info("Provider key masks: GROK=%s DEEPSEEK=%s OPENAI=%s", mask_key(GROK_API_KEY), mask_key(DEEPSEEK_API_KEY), mask_key(OPENAI_API_KEY))
+    app.run(host="0.0.0.0", port=port, threaded=True)

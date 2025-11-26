@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# entrypoint.sh — robust init script for BrittonMethod-auto (defensive & non-fatal)
+# Loads .env, prepares runtime, optional migrations, warmup, then starts Gunicorn or python main.py
+
+set -euo pipefail
+IFS=$'\n\t'
+
+# ---- Configuration / defaults ----
+APP_HOME="${APP_HOME:-/app}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-/tmp/britton_evidence}"
+ENV_FILE="${ENV_FILE:-${APP_HOME}/.env}"
+PORT="${PORT:-10000}"
+GUNICORN_CONF="${GUNICORN_CONF:-${APP_HOME}/gunicorn_conf.py}"
+GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
+GUNICORN_THREADS="${GUNICORN_THREADS:-2}"
+GUNICORN_TIMEOUT="${GUNICORN_TIMEOUT:-120}"
+GUNICORN_BIND="0.0.0.0:${PORT}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-1}"
+LOG_PREFIX="[entrypoint]"
+
+_log(){
+  printf "%s %s %s\n" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${LOG_PREFIX}" "$*"
+}
+
+# ---- Load .env safely (if present) ----
+_load_env(){
+  if [ -f "${ENV_FILE}" ]; then
+    _log "Loading environment from ${ENV_FILE} (values suppressed)"
+    # Create a sanitized temporary env file with only key=value lines (no comments or exports)
+    # Accepts lines like VAR=value and ignores others.
+    awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print $0 }' "${ENV_FILE}" > /tmp/.env.sanitized || true
+    if [ -s /tmp/.env.sanitized ]; then
+      # Export variables from sanitized file in a subshell, then export to current environment
+      # Using 'set -a' to export; then source; then 'set +a'
+      set -a
+      # shellcheck disable=SC1090
+      . /tmp/.env.sanitized || true
+      set +a
+      rm -f /tmp/.env.sanitized || true
+      _log ".env loaded (sanitized)."
+    else
+      _log ".env present but nothing to load after sanitization."
+      rm -f /tmp/.env.sanitized || true
+    fi
+  else
+    _log "No .env file at ${ENV_FILE}; skipping .env load."
+  fi
+}
+
+# ---- Prepare runtime dirs and permissions ----
+_prepare_runtime(){
+  _log "Preparing runtime dirs"
+  if [ ! -d "${EVIDENCE_DIR}" ]; then
+    mkdir -p "${EVIDENCE_DIR}" || true
+    _log "Created evidence dir ${EVIDENCE_DIR}"
+  fi
+  if [ -w "${EVIDENCE_DIR}" ]; then
+    _log "Evidence dir writable: ${EVIDENCE_DIR}"
+  else
+    _log "Attempting to set write permissions on ${EVIDENCE_DIR}"
+    chmod -R u+rwx "${EVIDENCE_DIR}" || true
+  fi
+}
+
+# ---- Optional DB migrations (alembic) ----
+_try_run_migrations(){
+  if [ -f "${APP_HOME}/alembic.ini" ] && command -v alembic >/dev/null 2>&1; then
+    _log "alembic config detected; attempting 'alembic upgrade head' (non-fatal)"
+    if ! alembic upgrade head; then
+      _log "alembic upgrade failed — continuing startup (inspect logs)"
+    else
+      _log "alembic migrations applied successfully."
+    fi
+  else
+    _log "No alembic config or alembic binary; skipping migrations."
+  fi
+}
+
+# ---- Light-weight diagnostics / warmup (non-blocking, tolerant) ----
+_warm_providers(){
+  _log "Running lightweight warmup diagnostics (app_core + providers) — tolerant of errors."
+  # ensure python exists
+  if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    _log "Python '${PYTHON_BIN}' not found; skipping Python warmup."
+    return 0
+  fi
+
+  # Run warmup in a safe way and capture output for logs (errors non-fatal)
+  "${PYTHON_BIN}" - <<'PYCODE' || {
+    echo '{"check":"warmup","ok":false,"error":"python_warmup_subprocess_failed"}'
+  }
+import json, os, traceback
+def safe_print(obj):
+    try:
+        print(json.dumps(obj, default=str))
+    except Exception:
+        print('{"check":"warmup","ok":false,"error":"json_dump_failed"}')
+
+# app_core diagnostics
+try:
+    import importlib, importlib.util
+    try:
+        ac = importlib.import_module("app_core")
+        if hasattr(ac, "diagnostics_report"):
+            try:
+                diag = ac.diagnostics_report()
+                safe_print({"check":"app_core.diagnostics_report","ok":True,"components": diag.get("components",{})})
+            except Exception as e:
+                safe_print({"check":"app_core.diagnostics_report","ok":False,"error": str(e)})
+        else:
+            safe_print({"check":"app_core","ok":True,"diagnostics_report":False})
+    except Exception as e:
+        safe_print({"check":"app_core","ok":False,"error": str(e)})
+except Exception as e:
+    safe_print({"check":"app_core_import","ok":False,"error":str(e)})
+
+# providers.factory quick import-check
+try:
+    try:
+        pf_spec = importlib.util.find_spec("providers.factory")
+        if pf_spec is not None:
+            pf = importlib.import_module("providers.factory")
+            has_get = any(hasattr(pf, name) for name in ("get_response","get_response_sync","get_response_async","get_response_text"))
+            safe_print({"check":"providers.factory","ok":True,"has_get_response": has_get})
+        else:
+            safe_print({"check":"providers.factory","ok":False,"error":"module_not_found"})
+    except Exception as e:
+        safe_print({"check":"providers.factory","ok":False,"error": str(e)})
+except Exception as e:
+    safe_print({"check":"providers.factory_import","ok":False,"error": str(e)})
+
+# prompts & personas presence
+try:
+    ppath = os.path.join("prompts","britton_underwriter_master.py")
+    if os.path.exists(ppath):
+        try:
+            spec = importlib.util.spec_from_file_location("prompts.master", ppath)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            safe_print({"check":"prompts.loaded","ok":True,"BRITTON_PROMPT_present": hasattr(mod,"BRITTON_UNDERWRITER_PROMPT"), "BRITTON_PERSONAS_present": hasattr(mod,"BRITTON_PERSONAS")})
+        except Exception as e:
+            safe_print({"check":"prompts.load_failed","ok":False,"error": str(e)})
+    else:
+        safe_print({"check":"prompts.file_missing","ok":False,"path": ppath})
+except Exception as e:
+    safe_print({"check":"prompts.override_error","ok":False,"error": str(e)})
+PYCODE
+
+  _log "Warmup diagnostics finished (see above JSON lines)."
+}
+
+# ---- Final start (gunicorn recommended) ----
+_start_server(){
+  if command -v gunicorn >/dev/null 2>&1; then
+    if [ -f "${GUNICORN_CONF}" ]; then
+      _log "Starting Gunicorn using ${GUNICORN_CONF} (bind=${GUNICORN_BIND})"
+      exec gunicorn -c "${GUNICORN_CONF}" main:app
+    else
+      _log "Starting Gunicorn (workers=${GUNICORN_WORKERS},threads=${GUNICORN_THREADS})"
+      exec gunicorn --bind "${GUNICORN_BIND}" --workers "${GUNICORN_WORKERS}" --threads "${GUNICORN_THREADS}" --timeout "${GUNICORN_TIMEOUT}" main:app
+    fi
+  else
+    _log "Gunicorn not found; falling back to python main.py"
+    exec "${PYTHON_BIN}" main.py
+  fi
+}
+
+# ---- Entrypoint flow ----
+_log "Starting entrypoint; APP_HOME=${APP_HOME} PORT=${PORT} (secrets suppressed)"
+
+# Safe initialization sequence
+_load_env
+_prepare_runtime
+_try_run_migrations
+_warm_providers
+
+# small delay for background tasks
+sleep "${STARTUP_WAIT_SECONDS}"
+
+_start_server
+
+# end

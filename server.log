@@ -1,0 +1,32 @@
+nohup: ignoring input
+2025-11-24 13:35:01,362 INFO Starting server on port 8000
+2025-11-24 13:35:01,362 INFO Provider order: GROK -> DEEPSEEK -> OPENAI
+ * Serving Flask app 'main'
+ * Debug mode: off
+2025-11-24 13:35:01,380 INFO [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8000
+ * Running on http://100.115.92.205:8000
+2025-11-24 13:35:01,380 INFO [33mPress CTRL+C to quit[0m
+2025-11-24 13:35:03,128 INFO Attempting GROK
+2025-11-24 13:35:03,128 INFO Attempting DEEPSEEK
+2025-11-24 13:35:03,128 INFO Attempting OPENAI
+2025-11-24 13:35:03,575 WARNING HTTP 429 from https://api.openai.com/v1/chat/completions -> retry after 1.0s (attempt 0)
+2025-11-24 13:35:05,317 WARNING HTTP 429 from https://api.openai.com/v1/chat/completions -> retry after 2.0s (attempt 1)
+2025-11-24 13:35:07,963 WARNING HTTP 429 from https://api.openai.com/v1/chat/completions -> retry after 4.0s (attempt 2)
+2025-11-24 13:35:11,966 INFO OpenAI failure: {'status': 429, 'body': {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}}
+2025-11-24 13:35:11,967 WARNING All providers failed; returning echo fallback
+2025-11-24 13:35:11,968 INFO 127.0.0.1 - - [24/Nov/2025 13:35:11] "POST /prompt HTTP/1.1" 200 -
+2025-11-24 13:35:12,005 INFO Attempting GROK
+2025-11-24 13:35:12,005 INFO Attempting DEEPSEEK
+2025-11-24 13:35:12,005 INFO Attempting OPENAI
+2025-11-24 13:35:12,381 WARNING HTTP 429 from https://api.openai.com/v1/chat/completions -> retry after 1.0s (attempt 0)
+2025-11-24 13:35:13,714 WARNING HTTP 429 from https://api.openai.com/v1/chat/completions -> retry after 2.0s (attempt 1)
+2025-11-24 13:35:16,889 WARNING HTTP 429 from https://api.openai.com/v1/chat/completions -> retry after 4.0s (attempt 2)
+2025-11-24 13:35:20,892 INFO OpenAI failure: {'status': 429, 'body': {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}}
+2025-11-24 13:35:20,893 WARNING All providers failed; returning echo fallback
+2025-11-24 13:35:20,893 INFO 127.0.0.1 - - [24/Nov/2025 13:35:20] "POST /generate/loi HTTP/1.1" 200 -
+/home/brittonhansle2/BrittonMethod-auto/main.py:190: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  return {"prompt": p}
+2025-11-25 09:27:51,106 INFO 127.0.0.1 - - [25/Nov/2025 09:27:51] "GET /health HTTP/1.1" 200 -
+2025-11-25 09:29:01,626 INFO 127.0.0.1 - - [25/Nov/2025 09:29:01] "GET /health HTTP/1.1" 200 -

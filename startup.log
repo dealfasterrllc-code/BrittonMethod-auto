@@ -1,0 +1,55 @@
+2025-11-25T02:39:05Z [entrypoint] Starting entrypoint; APP_HOME=/app, PORT=10000 (secrets suppressed)
+2025-11-25T02:39:05Z [entrypoint] No .env file at /app/.env; proceeding with current environment
+2025-11-25T02:39:05Z [entrypoint] Preparing runtime directories
+2025-11-25T02:39:05Z [entrypoint] No Alembic config detected; skipping migrations
+2025-11-25T02:39:05Z [entrypoint] Running lightweight warmup diagnostics
+2025-11-24 19:39:06,239 ERROR Failed loading LLM_PROMPT (continuing)
+Traceback (most recent call last):
+  File "/home/brittonhansle2/BrittonMethod-auto/app_core.py", line 174, in <module>
+    spec.loader.exec_module(mod)  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 995, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py", line 141, in <module>
+    from prompts.britton_underwriter_master import BRITTON_UNDERWRITER_PROMPT, BRITTON_PERSONAS
+  File "/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py", line 141, in <module>
+    from prompts.britton_underwriter_master import BRITTON_UNDERWRITER_PROMPT, BRITTON_PERSONAS
+ImportError: cannot import name 'BRITTON_PERSONAS' from partially initialized module 'prompts.britton_underwriter_master' (most likely due to a circular import) (/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py)
+{"check": "app_core.diagnostics_report", "ok": true, "result": {"components": {"requests": true, "httpx": false, "boto3": false, "numpy": true, "transformers": false, "sentence_transformers": false, "pinecone": false, "twilio_sdk": true, "openai_legacy": false, "openai_new": false}}}
+{"check": "providers.factory", "ok": true, "result": {"error": "No module named 'providers'"}}
+{"check": "prompts", "ok": true, "result": {"error": "cannot import name 'BRITTON_PERSONAS' from partially initialized module 'prompts.britton_underwriter_master' (most likely due to a circular import) (/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py)"}}
+2025-11-25T02:39:06Z [entrypoint] Warmup diagnostics complete
+2025-11-25T02:39:07Z [entrypoint] Gunicorn not found — falling back to python main.py
+2025-11-24 19:39:08,433 INFO britton.main SQLAlchemy metadata created.
+2025-11-24 19:39:08,654 ERROR Failed loading LLM_PROMPT (continuing)
+Traceback (most recent call last):
+  File "/home/brittonhansle2/BrittonMethod-auto/app_core.py", line 174, in <module>
+    spec.loader.exec_module(mod)  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 995, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py", line 141, in <module>
+    from prompts.britton_underwriter_master import BRITTON_UNDERWRITER_PROMPT, BRITTON_PERSONAS
+  File "/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py", line 141, in <module>
+    from prompts.britton_underwriter_master import BRITTON_UNDERWRITER_PROMPT, BRITTON_PERSONAS
+ImportError: cannot import name 'BRITTON_PERSONAS' from partially initialized module 'prompts.britton_underwriter_master' (most likely due to a circular import) (/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py)
+2025-11-24 19:39:08,654 ERROR app_core Failed loading LLM_PROMPT (continuing)
+Traceback (most recent call last):
+  File "/home/brittonhansle2/BrittonMethod-auto/app_core.py", line 174, in <module>
+    spec.loader.exec_module(mod)  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 995, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py", line 141, in <module>
+    from prompts.britton_underwriter_master import BRITTON_UNDERWRITER_PROMPT, BRITTON_PERSONAS
+  File "/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py", line 141, in <module>
+    from prompts.britton_underwriter_master import BRITTON_UNDERWRITER_PROMPT, BRITTON_PERSONAS
+ImportError: cannot import name 'BRITTON_PERSONAS' from partially initialized module 'prompts.britton_underwriter_master' (most likely due to a circular import) (/home/brittonhansle2/BrittonMethod-auto/prompts/britton_underwriter_master.py)
+2025-11-24 19:39:08,657 INFO britton.main Loaded app_core functions from app_core.py
+2025-11-24 19:39:08,657 INFO britton.main Background worker starting.
+2025-11-24 19:39:08,676 INFO britton.main Starting BrittonMethod-auto (Flask debug server) on port 8000
+2025-11-24 19:39:08,677 INFO britton.main Primary provider: GROK; app_core=True; provider_factory=False
+ * Serving Flask app 'main'
+ * Debug mode: off
+Address already in use
+Port 8000 is in use by another program. Either identify and stop that program, or start the server with a different port.

@@ -1,9 +1,127 @@
 #!/usr/bin/env bash
+# entrypoint.sh — robust, non-crashing init script for BrittonMethod-auto
+
 set -euo pipefail
+IFS=$'\n\t'
 
-# Entrypoint for BrittonMethod-auto
-echo "[INFO] Starting entrypoint.sh..."
-export PATH="$HOME/.local/bin:$PATH"
+# ---- Configuration / defaults ----
+APP_HOME="${APP_HOME:-/app}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-/tmp/britton_evidence}"
+ENV_FILE="${ENV_FILE:-${APP_HOME}/.env}"
+PORT="${PORT:-10000}"
+GUNICORN_CONF="${GUNICORN_CONF:-${APP_HOME}/gunicorn_conf.py}"
+GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
+GUNICORN_THREADS="${GUNICORN_THREADS:-2}"
+GUNICORN_TIMEOUT="${GUNICORN_TIMEOUT:-120}"
+GUNICORN_BIND="0.0.0.0:${PORT}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-1}"
+LOG_PREFIX="[entrypoint]"
 
-# Add any production-ready environment initialization here
-echo "[INFO] Entrypoint setup complete."
+_log(){
+  printf "%s %s %s\n" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${LOG_PREFIX}" "$*"
+}
+
+# ---- Load .env safely ----
+_load_env(){
+  if [ -f "${ENV_FILE}" ]; then
+    _log "Loading environment from ${ENV_FILE} (values suppressed)"
+    set -o allexport
+    grep -v '^\s*#' "${ENV_FILE}" | sed 's/\r$//' | sed '/^\s*$/d' > /tmp/.env.tmp || true
+    . /tmp/.env.tmp || true
+    rm -f /tmp/.env.tmp
+    set +o allexport
+  else
+    _log "No .env file at ${ENV_FILE}; proceeding with current environment"
+  fi
+}
+
+# ---- Prepare runtime directories ----
+_prepare_runtime(){
+  _log "Preparing runtime directories"
+  mkdir -p "${EVIDENCE_DIR}" || true
+  if [ ! -w "${EVIDENCE_DIR}" ]; then
+    _log "Adjusting write permissions for ${EVIDENCE_DIR}"
+    chmod -R u+rwx "${EVIDENCE_DIR}" || true
+  fi
+}
+
+# ---- Optional Alembic migrations ----
+_try_run_migrations(){
+  if [ -f "${APP_HOME}/alembic.ini" ] && command -v alembic >/dev/null 2>&1; then
+    _log "Alembic detected; attempting migrations"
+    if ! alembic upgrade head; then
+      _log "Alembic upgrade failed — continuing startup"
+    else
+      _log "Alembic migrations applied successfully"
+    fi
+  else
+    _log "No Alembic config detected; skipping migrations"
+  fi
+}
+
+# ---- Lightweight Python warmup ----
+_warm_providers(){
+  _log "Running lightweight warmup diagnostics"
+  ${PYTHON_BIN} - <<'PYCODE' || true
+import sys, os, json, importlib
+def _safe_print(tag, obj):
+    try:
+        print(json.dumps({"check": tag, "ok": True, "result": obj}, default=str))
+    except Exception:
+        print(json.dumps({"check": tag, "ok": False, "error": "serialization_failed"}))
+
+try:
+    ac = importlib.import_module("app_core")
+    diag = getattr(ac, "diagnostics_report", lambda: {})()
+    _safe_print("app_core.diagnostics_report", {"components": diag.get("components", {})})
+except Exception as e:
+    _safe_print("app_core", {"error": str(e)})
+
+try:
+    pf = importlib.import_module("providers.factory")
+    has_get = any(hasattr(pf, f) for f in ["get_response","get_response_sync","get_response_async"])
+    _safe_print("providers.factory", {"has_get_response": has_get})
+except Exception as e:
+    _safe_print("providers.factory", {"error": str(e)})
+
+try:
+    prompts_path = os.path.join("prompts","britton_underwriter_master.py")
+    if os.path.exists(prompts_path):
+        spec = importlib.util.spec_from_file_location("britton_underwriter_master", prompts_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _safe_print("prompts.britton_underwriter_master", {"present": True, "personas_present": hasattr(mod, "BRITTON_PERSONAS")})
+    else:
+        _safe_print("prompts.britton_underwriter_master", {"present": False})
+except Exception as e:
+    _safe_print("prompts", {"error": str(e)})
+PYCODE
+  _log "Warmup diagnostics complete"
+}
+
+# ---- Start server ----
+_start_server(){
+  if command -v gunicorn >/dev/null 2>&1; then
+    if [ -f "${GUNICORN_CONF}" ]; then
+      _log "Starting Gunicorn using config ${GUNICORN_CONF} on ${GUNICORN_BIND}"
+      exec gunicorn -c "${GUNICORN_CONF}" main:app
+    else
+      _log "Starting Gunicorn (workers=${GUNICORN_WORKERS}, threads=${GUNICORN_THREADS}, timeout=${GUNICORN_TIMEOUT})"
+      exec gunicorn --bind "${GUNICORN_BIND}" --workers "${GUNICORN_WORKERS}" --threads "${GUNICORN_THREADS}" --timeout "${GUNICORN_TIMEOUT}" main:app
+    fi
+  else
+    _log "Gunicorn not found — falling back to python main.py"
+    exec ${PYTHON_BIN} main.py
+  fi
+}
+
+# ---- Entrypoint flow ----
+_log "Starting entrypoint; APP_HOME=${APP_HOME}, PORT=${PORT} (secrets suppressed)"
+_load_env
+_prepare_runtime
+_try_run_migrations
+_warm_providers
+sleep "${STARTUP_WAIT_SECONDS}"
+_start_server
+

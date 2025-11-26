@@ -1,4 +1,4 @@
-#!/home/brittonhansle2/BrittonMethod-auto/.venv/bin/python3.12
+#!/home/brittonhansle2/BrittonMethod-auto/.venv/bin/python
 import sys
 from uvicorn.main import main
 if __name__ == '__main__':
